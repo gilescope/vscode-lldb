@@ -798,13 +798,38 @@
 				],
 				"configurationAttributes": {
 					"launch": {
-						"required": [
-							"program"
-						],
 						"properties": {
 							"program": {
-								"description": "Path to the Rust binary to debug.",
+								"description": "Path to the Rust binary to debug. Either set this directly, or set `cargo` to have BugStalker build it for you.",
 								"type": "string"
+							},
+							"cargo": {
+								"description": "Cargo invocation parameters. The build artifact path replaces ${cargo:program} (and fills `program` if it's empty).",
+								"type": "object",
+								"properties": {
+									"args": {
+										"description": "Cargo command line arguments (e.g. [\"build\", \"--bin=foo\"], or [\"test\", \"--no-run\", \"--lib\"]).",
+										"type": "array",
+										"default": [
+											"build"
+										]
+									},
+									"filter": {
+										"description": "Filter applied to compilation artifacts when more than one matches.",
+										"type": "object",
+										"properties": {
+											"name": {
+												"type": "string"
+											},
+											"kind": {
+												"type": "string"
+											}
+										}
+									}
+								},
+								"required": [
+									"args"
+								]
 							},
 							"args": {
 								"description": "Program arguments.",
@@ -859,6 +884,39 @@
 							"request": "launch",
 							"name": "${2:Debug}",
 							"program": "^\"\\${workspaceFolder}/${1:target/debug/<your program>}\"",
+							"args": [],
+							"cwd": "^\"\\${workspaceFolder}\""
+						}
+					},
+					{
+						"label": "BugStalker: Debug Cargo binary (build then run)",
+						"body": {
+							"type": "bugstalker",
+							"request": "launch",
+							"name": "${2:Cargo launch}",
+							"cargo": {
+								"args": [
+									"build",
+									"--bin=${1:<binary name>}"
+								]
+							},
+							"args": [],
+							"cwd": "^\"\\${workspaceFolder}\""
+						}
+					},
+					{
+						"label": "BugStalker: Debug Cargo unit tests",
+						"body": {
+							"type": "bugstalker",
+							"request": "launch",
+							"name": "${2:Cargo test}",
+							"cargo": {
+								"args": [
+									"test",
+									"--no-run",
+									"${1:--lib}"
+								]
+							},
 							"args": [],
 							"cwd": "^\"\\${workspaceFolder}\""
 						}

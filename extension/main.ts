@@ -14,7 +14,7 @@ import * as diagnostics from './diagnostics';
 import * as htmlView from './htmlView';
 import * as util from './configUtils';
 import * as adapter from './novsc/adapter';
-import { getBugStalkerAdapterExecutable } from './novsc/bugstalker';
+import { BugStalkerConfigProvider, getBugStalkerAdapterExecutable } from './novsc/bugstalker';
 import * as install from './install';
 import { Cargo, expandCargo } from './cargo';
 import { pickProcess } from './pickProcess';
@@ -56,6 +56,14 @@ class Extension implements DebugConfigurationProvider, DebugAdapterDescriptorFac
             },
         };
         subscriptions.push(debug.registerDebugAdapterDescriptorFactory('bugstalker', bsFactory));
+        // BugStalker config provider — handles `cargo` block expansion
+        // and string-form `args`. Deliberately separate from the LLDB
+        // path's resolveDebugConfiguration so it doesn't drag in the
+        // LLDB-specific prerequisite checks / dbgconfig / launch
+        // defaults.
+        subscriptions.push(
+            debug.registerDebugConfigurationProvider('bugstalker', new BugStalkerConfigProvider()),
+        );
 
         subscriptions.push(commands.registerCommand('lldb.diagnose', () => this.runDiagnostics()));
         subscriptions.push(commands.registerCommand('lldb.getCargoLaunchConfigs', () => this.getCargoLaunchConfigs()));
