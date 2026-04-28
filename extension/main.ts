@@ -13,6 +13,7 @@ import { AdapterSettings } from 'codelldb';
 import * as webview from './webview';
 import * as util from './configUtils';
 import * as adapter from './novsc/adapter';
+import { getBugStalkerAdapterExecutable } from './novsc/bugstalker';
 import * as install from './install';
 import * as async from './novsc/async';
 import { Dict } from './novsc/commonTypes';
@@ -83,6 +84,16 @@ class Extension implements DebugAdapterDescriptorFactory {
             (...args) => completionProvider.insertDebugConfig(args)));
 
         subscriptions.push(debug.registerDebugAdapterDescriptorFactory('lldb', this));
+
+        // BugStalker uses its own descriptor factory — stdio adapter,
+        // no LLDB libraries to locate, no Python to find.
+        const bsFactory: DebugAdapterDescriptorFactory = {
+            createDebugAdapterDescriptor: (_session, _executable) => {
+                const cfg = workspace.getConfiguration('bugstalker');
+                return getBugStalkerAdapterExecutable(cfg);
+            },
+        };
+        subscriptions.push(debug.registerDebugAdapterDescriptorFactory('bugstalker', bsFactory));
 
         subscriptions.push(commands.registerCommand('lldb.getCargoLaunchConfigs', (uri) => this.getCargoLaunchConfigs(uri)));
         subscriptions.push(commands.registerCommand('lldb.pickMyProcess', (config) => pickProcess(context, false, config)));
