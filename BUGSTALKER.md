@@ -1,21 +1,18 @@
 # BugStalker integration
 
-This fork registers a second debug adapter type, `bugstalker`,
-alongside the upstream `lldb` type. Selecting `"type": "bugstalker"`
-in your `launch.json` routes the session through
-[BugStalker](https://github.com/gilescope/BugStalker) — a Rust-aware,
-DWARF-native, pure-Rust debugger — rather than LLDB. The LLDB path
-is untouched; both can coexist.
+This extension registers a single debug adapter type, `bugstalker`,
+backed by [BugStalker](https://github.com/gilescope/BugStalker) — a
+Rust-aware, DWARF-native, pure-Rust debugger. No LLDB libraries, no
+Python, no platform-specific adapter binaries to download.
 
-## When to pick `bugstalker` over `lldb`
+## What you get
 
 `bugstalker` is Rust-first. It demangles v0 and legacy mangling with
 an in-tree parser, recovers concrete types behind `dyn Trait` from
 vtable symbols, prints niche-encoded `Option`/`Result` correctly,
 detects `Rc`/`Arc` cycles, and walks `tokio` async backtraces with
-recovered `.await` source coords. If those features matter for what
-you are debugging, pick `bugstalker`. If you need LLDB's broader
-language coverage (C++, Swift, …), stay on `lldb`.
+recovered `.await` source coords. For C++ / Swift / non-Rust
+targets, use a different debugger (e.g. CodeLLDB upstream).
 
 ## One-time install
 
@@ -83,8 +80,7 @@ Attaching to a running process:
 
 ## Cargo build integration
 
-The same `cargo` block the upstream LLDB path supports works under
-`bugstalker` too — set `cargo.args` and BugStalker will build the
+Set a `cargo` block in `launch.json` and BugStalker will build the
 target and use the produced artifact as `program`:
 
 ```jsonc
@@ -114,9 +110,9 @@ target and use the produced artifact as `program`:
 }
 ```
 
-`${cargo:program}` is also expanded inside the rest of the config,
-matching the LLDB path's behaviour. Multiple matching artefacts
-trigger an error; use the `cargo.filter` field to narrow.
+`${cargo:program}` is also expanded inside the rest of the config.
+Multiple matching artefacts trigger an error; use the `cargo.filter`
+field (`{ "name": "...", "kind": "..." }`) to narrow.
 
 ## Limitations
 
@@ -126,18 +122,20 @@ trigger an error; use the `cargo.filter` field to narrow.
 
 ## Implementation notes
 
-The integration is intentionally minimal — about 100 lines of patch
-on top of the upstream extension:
+The extension is a thin shim — under 200 lines of TypeScript total:
 
+- `extension/main.ts` registers the `bugstalker` debug adapter
+  descriptor factory and the config provider.
 - `extension/novsc/bugstalker.ts` builds a `DebugAdapterExecutable`
-  that spawns `bugstalker --dap` over stdio. No TCP handshake, no
-  port-scanning regex.
-- `extension/main.ts` registers a second
-  `DebugAdapterDescriptorFactory` for the `bugstalker` type.
-- `package.json` adds the `bugstalker` debugger entry, two config
-  settings (`bugstalker.executable` / `bugstalker.logFile`), and
-  two configuration snippets.
+  that spawns `bugstalker --dap` over stdio (no TCP handshake, no
+  port-scanning regex) and a `BugStalkerConfigProvider` that
+  expands the `cargo` block before the adapter is spawned.
+- `extension/cargo.ts` (carried over from the upstream
+  `vscode-lldb` fork as the language-agnostic helper) runs `cargo
+  build --message-format=json`, picks the matching
+  `compiler-artifact`, and supplies the path for `${cargo:program}`
+  expansion.
 
-The LLDB path (the `lldb` debug type, the codelldb binary, the
-LLDB shared library lookups) is unchanged and unaware of any of
-this.
+That's the whole extension — the rest is package metadata, a
+webpack config that bundles the entry point into `out/extension.js`,
+and the `tsconfig.json`.

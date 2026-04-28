@@ -1,54 +1,87 @@
-# Features
-- Debugging on Linux (x64 or ARM), macOS and Windows<sup>*</sup>,
-- Conditional breakpoints, function breakpoints, data breakpoints, logpoints,
-- Launch debuggee in integrated or external terminal,
-- Disassembly view with instruction-level stepping,
-- Loaded modules view,
-- Python scripting,
-- HTML rendering for advanced visualizations,
-- Rust language support with built-in visualizars for vectors, strings and other standard types,
-- Global and workspace defaults for launch configurations,
-- Remote debugging,
-- Reverse debugging (experimental, requires compatible backend).
+# BugStalker for VS Code
 
-<sup>\*</sup> DWARF debug info format recommended, limited support for MS PDB.
+VS Code debug adapter integration for
+[BugStalker](https://github.com/gilescope/BugStalker) — a pure-Rust,
+DWARF-native debugger purpose-built for Rust:
 
-For full details please see the [Users Manual](MANUAL.md).
+- v0 + legacy symbol demangling via an in-tree parser.
+- vtable-driven concrete-type recovery for `Box<dyn Trait>`,
+  `Pin<Box<dyn Future>>`, and friends.
+- Niche-resilient `Option<T>` / `Result<T, E>` decoding (zero-bit /
+  null-pointer / NonZero* / `bool` / `char` / fn-pointer niches).
+- `Rc<T>` / `Arc<T>` cycle detection with depth-bounded rendering.
+- Tokio async await-trace: per-task awaitee chain with recovered
+  source coordinates from `DW_AT_decl_file` / `DW_AT_decl_line`.
 
-# Requirements
-- 64-bit OS
-    - Linux: glibc 2.18 (available by default in Debian 8, Ubuntu 14.04, Centos 8)
-    - Mac: OS X 10.10 Yosemite
-    - Windows: 10.0
-- 64-bit Python 3.5 or later (optional, except on Windows).
+The extension itself is a thin shim: it spawns the BugStalker
+binary in stdio DAP mode (`bugstalker --dap`) and otherwise stays
+out of the way. No LLDB libraries, no Python, no platform-specific
+adapter binaries to download.
 
-# Quick Start
-Here's a minimal debug configuration to get you started:
-```javascript
-{
-    "name": "Launch",
-    "type": "lldb",
-    "request": "launch",
-    "program": "${workspaceFolder}/<my program>",
-    "args": ["-arg1", "-arg2"],
-}
+## Quick start
+
+1. Install the BugStalker binary somewhere on your `PATH`:
+
+   ```sh
+   cargo install bugstalker
+   ```
+
+   Or build from source:
+
+   ```sh
+   git clone https://github.com/gilescope/BugStalker
+   cd BugStalker && cargo install --path .
+   ```
+
+2. Make sure the binary has the OS permissions it needs for ptrace:
+
+   - **macOS**: codesign with the `task_for_pid` entitlement
+     (BugStalker's repo carries the entitlements file).
+   - **Linux**: install with `setcap cap_sys_ptrace=ep`, run under
+     `sudo`, or set `kernel.yama.ptrace_scope = 0`.
+
+3. Add a `launch.json` configuration:
+
+   ```jsonc
+   {
+       "version": "0.2.0",
+       "configurations": [
+           {
+               "name": "Debug",
+               "type": "bugstalker",
+               "request": "launch",
+               "cargo": { "args": ["build", "--bin=my_bin"] },
+               "args": [],
+               "cwd": "${workspaceFolder}"
+           }
+       ]
+   }
+   ```
+
+   F5 to start. Cargo runs first, the produced artefact becomes
+   `program`, and BugStalker takes over.
+
+See [`BUGSTALKER.md`](BUGSTALKER.md) for the full quickstart,
+settings, cargo block reference, and what's wired through the DAP
+channel (including the BugStalker-specific `bs/awaitTrace` custom
+request).
+
+## Building the extension
+
+```sh
+npm install
+npm run build              # webpack production bundle into out/extension.js
+# or:
+npm run watch              # development build, rebuild on change
+npm run typecheck          # tsc --noEmit only
 ```
 
-# Links
-- [Users Manual](MANUAL.md)
-- [Debugging in VS Code](https://code.visualstudio.com/docs/editor/debugging)
-- [Troubleshooting](https://github.com/vadimcn/vscode-lldb/wiki/Troubleshooting)
-- [Wiki](https://github.com/vadimcn/vscode-lldb/wiki)
-- [Chat](https://gitter.im/vscode-lldb/QnA)
+`earthly +bs-gate` (or `+all`) runs the same gate the Earthfile-
+based CI uses.
 
+## License
 
-# Screenshots
-
-C++ debugging with data visualization ([Howto](https://github.com/vadimcn/vscode-lldb/wiki/Data-visualization)):<br>
-![source](images/plotting.png)
-<br>
-<br>
-Rust debugging:<br>
-![source](images/source.png)
-
-
+MIT. Forked from [`vadimcn/vscode-lldb`](https://github.com/vadimcn/vscode-lldb)
+(also MIT) as a starting point; the LLDB-side code (codelldb adapter,
+LLDB shared-library lookups, Python integration) has been removed
+since BugStalker is its own pure-Rust DAP server.

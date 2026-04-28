@@ -1,20 +1,19 @@
 {
-	"compilerOptions": {
-		"target": "es2017",
-		"module": "commonjs",
-		"moduleResolution": "node",
-		"esModuleInterop": true,
-		"alwaysStrict": true,
-		"noImplicitAny": true,
-		"removeComments": false,
-		"preserveConstEnums": true,
-		"sourceMap": true,
-		"baseUrl": ".",
-		"paths": {
-			"*": [
-				"../build/node_modules/*",
-				"../build/node_modules/@types/*",
-			]
-		}
-	}
+    "compilerOptions": {
+        "target": "ES2020",
+        "module": "commonjs",
+        "moduleResolution": "node",
+        "esModuleInterop": true,
+        "alwaysStrict": true,
+        "noImplicitAny": true,
+        "removeComments": false,
+        "preserveConstEnums": true,
+        "sourceMap": true,
+        "skipLibCheck": true,
+        "outDir": "../out",
+        "rootDir": "."
+    },
+    "include": [
+        "**/*.ts"
+    ]
 }

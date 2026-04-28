@@ -1,31 +1,21 @@
 VERSION 0.8
 
-# Reproducible CI for the BugStalker-aware vscode-lldb fork.
+# Reproducible CI for the BugStalker VS Code extension.
 #
-# Scope: the bits this fork actually changes — `package.json`'s
-# `bugstalker` debug-type registration, the `BUGSTALKER.md` doc.
+# The extension is a thin TypeScript shim that spawns
+# `bugstalker --dap` over stdio. There is no LLDB, no codelldb Rust
+# adapter, no CMake — `npm install && npm run build` is enough to
+# produce `out/extension.js`.
 #
-# What this Earthfile deliberately *doesn't* try to do:
-#
-# - Compile the TypeScript extension. The upstream `tsconfig.json`
-#   points `paths` at `../build/node_modules/*`, which the upstream
-#   CMakeLists.txt populates at build time. Running `tsc` outside
-#   that CMake flow fails with module-resolution errors that aren't
-#   caused by this fork.
-# - Webpack-bundle the extension. `webpack.config.js` carries
-#   unresolved CMake placeholders (`@CMAKE_BINARY_DIR@`).
-# - Build the codelldb Rust adapter. Needs LLDB headers, clang, and
-#   a full LLDB checkout — out of scope for this fork.
-#
-# The CI gate this Earthfile *does* run:
-#
-# - `+lint-package-json` — jq-driven schema sanity. Catches
-#   regressions where someone drops the `bugstalker` debug type or a
-#   `bugstalker.*` setting from package.json.
-# - `+lint-markdown` — markdownlint over `BUGSTALKER.md`. Keeps the
-#   user-facing quickstart well-formed.
-#
-# Run `earthly +bs-gate` for the full BugStalker-relevant gate.
+# Targets:
+#   +deps              npm ci into a cached layer
+#   +typecheck         tsc --noEmit -p extension/tsconfig.json
+#   +webpack           production webpack bundle, exports out/extension.js
+#   +vsix              produce vscode-bugstalker-<v>.vsix
+#   +lint-package-json jq schema sanity
+#   +lint-markdown     markdownlint-cli2 over README.md + BUGSTALKER.md
+#   +bs-gate           lint + typecheck (cheap, run before pushing)
+#   +all               +bs-gate + +webpack + +vsix
 ARG --global VL_PLATFORM=linux/amd64
 ARG --global NODE_VERSION=20
 
@@ -40,32 +30,62 @@ common:
         rm -rf /var/lib/apt/lists/*
     WORKDIR /vl
 
-# Schema sanity. Fails when this fork's BugStalker plumbing has
-# silently regressed.
+# Manifests-only layer. Maximises npm-cache reuse: install only
+# re-runs when package.json or package-lock.json moves.
+package-manifests:
+    FROM +common
+    COPY package.json package-lock.json ./
+
+deps:
+    FROM +package-manifests
+    RUN --mount=type=cache,target=/root/.npm \
+        npm ci --no-audit --no-fund
+
+# Full source plus the installed deps. Most other targets start here.
+source:
+    FROM +deps
+    COPY --dir extension ./
+    COPY webpack.config.js README.md BUGSTALKER.md \
+         .markdownlint-cli2.jsonc \
+         ./
+    COPY images ./images
+
+typecheck:
+    FROM +source
+    RUN npx tsc --noEmit -p extension/tsconfig.json
+
+webpack:
+    FROM +source
+    RUN npx webpack --mode production
+    SAVE ARTIFACT out/extension.js AS LOCAL build/extension.js
+    SAVE ARTIFACT out/extension.js.map AS LOCAL build/extension.js.map
+
+# `vsce package` produces the installable .vsix. Doesn't need any
+# native binaries; the BugStalker DAP server is shipped separately
+# (`cargo install bugstalker`).
+vsix:
+    FROM +source
+    # Run the production webpack build in this stage so vsce sees
+    # `out/extension.js`.
+    RUN npx webpack --mode production
+    RUN npm install -g @vscode/vsce@2.32.0
+    RUN vsce package --no-dependencies --skip-license -o vscode-bugstalker.vsix
+    SAVE ARTIFACT vscode-bugstalker.vsix AS LOCAL build/vscode-bugstalker.vsix
+
 lint-package-json:
     FROM +common
     COPY package.json ./
-    # Must parse.
     RUN jq -e . package.json > /dev/null
-    # Must register both `lldb` (upstream) and `bugstalker` (fork).
-    RUN jq -e '.contributes.debuggers | map(.type) | index("lldb") != null' \
-            package.json > /dev/null \
-        || { echo "package.json: missing lldb debug type"; exit 1; }
     RUN jq -e '.contributes.debuggers | map(.type) | index("bugstalker") != null' \
             package.json > /dev/null \
         || { echo "package.json: missing bugstalker debug type"; exit 1; }
-    # `bugstalker` schema must require nothing — `program` is
-    # optional when `cargo` is set.
-    RUN jq -e '.contributes.debuggers[] | select(.type == "bugstalker")
-                | .configurationAttributes.launch.required // [] | length == 0' \
+    # Single debug type — LLDB is intentionally gone.
+    RUN jq -e '.contributes.debuggers | length == 1' \
             package.json > /dev/null \
-        || { echo "package.json: bugstalker launch shouldn'\''t require properties; cargo block fills program"; exit 1; }
-    # `bugstalker` launch must accept a `cargo` object.
-    RUN jq -e '.contributes.debuggers[] | select(.type == "bugstalker")
-                | .configurationAttributes.launch.properties.cargo != null' \
+        || { echo "package.json: more than one debug type registered"; exit 1; }
+    RUN jq -e '.contributes.debuggers[0].configurationAttributes.launch.properties.cargo != null' \
             package.json > /dev/null \
         || { echo "package.json: bugstalker launch missing cargo property"; exit 1; }
-    # Both fork-specific settings must exist.
     RUN jq -e '.contributes.configuration.properties["bugstalker.executable"] != null' \
             package.json > /dev/null \
         || { echo "package.json: missing bugstalker.executable setting"; exit 1; }
@@ -73,19 +93,18 @@ lint-package-json:
             package.json > /dev/null \
         || { echo "package.json: missing bugstalker.logFile setting"; exit 1; }
 
-# Markdown lint over the user-facing doc this fork ships. Config in
-# `.markdownlint-cli2.jsonc` (relaxes line-length, matches the
-# BugStalker repo's own convention).
 lint-markdown:
     FROM +common
     RUN npm install -g markdownlint-cli2@0.15.0
-    COPY .markdownlint-cli2.jsonc BUGSTALKER.md ./
-    RUN markdownlint-cli2 BUGSTALKER.md
+    COPY .markdownlint-cli2.jsonc README.md BUGSTALKER.md ./
+    RUN markdownlint-cli2 README.md BUGSTALKER.md
 
-# BugStalker-relevant CI gate. Cheap; run before pushing.
 bs-gate:
     BUILD +lint-package-json
     BUILD +lint-markdown
+    BUILD +typecheck
 
 all:
     BUILD +bs-gate
+    BUILD +webpack
+    BUILD +vsix
