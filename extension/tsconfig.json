@@ -1,24 +1,19 @@
 {
-	"compilerOptions": {
-		"target": "es2020",
-		"module": "commonjs",
-		"moduleResolution": "node",
-		"esModuleInterop": true,
-		"alwaysStrict": true,
-		"strict": true,
-		"noImplicitAny": true,
-		"removeComments": false,
-		"preserveConstEnums": true,
-		"sourceMap": true,
-		"baseUrl": ".",
-		"typeRoots": [
-			"../build/node_modules/@types",
-		],
-		"paths": {
-			"*": [
-				"../build/generated/*",
-				"../build/node_modules/*",
-			]
-		}
-	}
+    "compilerOptions": {
+        "target": "ES2020",
+        "module": "commonjs",
+        "moduleResolution": "node",
+        "esModuleInterop": true,
+        "alwaysStrict": true,
+        "noImplicitAny": true,
+        "removeComments": false,
+        "preserveConstEnums": true,
+        "sourceMap": true,
+        "skipLibCheck": true,
+        "outDir": "../out",
+        "rootDir": "."
+    },
+    "include": [
+        "**/*.ts"
+    ]
 }

@@ -1,14 +1,14 @@
 // Markdown lint config for the BugStalker fork's docs.
 //
-// `BUGSTALKER.md` deliberately uses long lines for the cargo/launch
-// JSON snippets (which would lose readability if hard-wrapped at
-// 80 cols) and a wide settings table. We disable the line-length
-// rule and let prose wrap to author taste.
+// Long lines for JSON / cargo snippets and wide tables would lose
+// readability if hard-wrapped at 80 cols. Disable line-length and
+// let prose wrap to author taste.
 {
     "config": {
         "MD013": false
     },
     "globs": [
-        "BUGSTALKER.md"
+        "BUGSTALKER.md",
+        "README.md"
     ]
 }
