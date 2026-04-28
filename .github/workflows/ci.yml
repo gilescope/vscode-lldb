@@ -1,0 +1,47 @@
+name: CI
+
+# Per CLAUDE.md project policy:
+# - actions are pinned to commit SHAs (managed by `upaction`),
+# - permissions live on the job, not the top level,
+# - CI work is delegated to Earthly targets so the same gate runs
+#   locally with `earthly +<target>`.
+
+on:
+  push:
+    branches: [master, bt]
+  pull_request:
+    branches: [master, bt]
+
+jobs:
+  bs-gate:
+    name: lint + typecheck
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: earthly/actions-setup@43211c7a0eae5344d6d79fb4aaf209c8f8866203  # v1.0.13
+        with:
+          version: v0.8.17
+      - name: earthly +bs-gate
+        run: earthly --strict +bs-gate
+
+  vsix:
+    name: package vsix
+    runs-on: ubuntu-24.04
+    needs: bs-gate
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: earthly/actions-setup@43211c7a0eae5344d6d79fb4aaf209c8f8866203  # v1.0.13
+        with:
+          version: v0.8.17
+      - name: earthly +vsix
+        run: earthly --strict +vsix
+      - name: upload vsix artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: vscode-bugstalker-vsix
+          path: build/vscode-bugstalker.vsix
+          if-no-files-found: error
