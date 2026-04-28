@@ -81,12 +81,46 @@ Attaching to a running process:
   awaitee chain (Phase 3 D3a). Schema documented at
   `doc/plans/phase-3-dyn-trait-and-async.md` in the BugStalker repo.
 
+## Cargo build integration
+
+The same `cargo` block the upstream LLDB path supports works under
+`bugstalker` too — set `cargo.args` and BugStalker will build the
+target and use the produced artifact as `program`:
+
+```jsonc
+{
+    "name": "Debug Cargo binary",
+    "type": "bugstalker",
+    "request": "launch",
+    "cargo": {
+        "args": ["build", "--bin=my_bin"]
+    },
+    "args": [],
+    "cwd": "${workspaceFolder}"
+}
+```
+
+```jsonc
+{
+    "name": "Debug Cargo unit tests",
+    "type": "bugstalker",
+    "request": "launch",
+    "cargo": {
+        "args": ["test", "--no-run", "--lib"],
+        "filter": { "name": "my_lib", "kind": "lib" }
+    },
+    "args": [],
+    "cwd": "${workspaceFolder}"
+}
+```
+
+`${cargo:program}` is also expanded inside the rest of the config,
+matching the LLDB path's behaviour. Multiple matching artefacts
+trigger an error; use the `cargo.filter` field to narrow.
+
 ## Limitations
 
 - No source-map remapping (yet). Paths come from DWARF as-is.
-- Cargo build integration (the upstream fork's `cargo`/`${cargo:program}`
-  handling) is **not** wired through to the BugStalker side. Build
-  yourself, then point `program` at the artifact.
 - `bugstalker` is in active development; treat the integration as
   preview-grade.
 

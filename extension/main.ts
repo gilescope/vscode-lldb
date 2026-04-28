@@ -13,7 +13,7 @@ import { AdapterSettings } from 'codelldb';
 import * as webview from './webview';
 import * as util from './configUtils';
 import * as adapter from './novsc/adapter';
-import { getBugStalkerAdapterExecutable } from './novsc/bugstalker';
+import { BugStalkerConfigProvider, getBugStalkerAdapterExecutable } from './novsc/bugstalker';
 import * as install from './install';
 import * as async from './novsc/async';
 import { Dict } from './novsc/commonTypes';
@@ -94,6 +94,14 @@ class Extension implements DebugAdapterDescriptorFactory {
             },
         };
         subscriptions.push(debug.registerDebugAdapterDescriptorFactory('bugstalker', bsFactory));
+        // BugStalker config provider — handles `cargo` block expansion
+        // and string-form `args`. Deliberately separate from the LLDB
+        // path's resolveDebugConfiguration so it doesn't drag in the
+        // LLDB-specific prerequisite checks / dbgconfig / launch
+        // defaults.
+        subscriptions.push(
+            debug.registerDebugConfigurationProvider('bugstalker', new BugStalkerConfigProvider()),
+        );
 
         subscriptions.push(commands.registerCommand('lldb.getCargoLaunchConfigs', (uri) => this.getCargoLaunchConfigs(uri)));
         subscriptions.push(commands.registerCommand('lldb.pickMyProcess', (config) => pickProcess(context, false, config)));
