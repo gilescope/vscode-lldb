@@ -372,6 +372,17 @@
 					},
 					"default": {},
 					"scope": "resource"
+				},
+				"bugstalker.executable": {
+					"description": "Path to the BugStalker binary used as the DAP adapter for `\"type\": \"bugstalker\"` configurations. Defaults to looking up `bugstalker` on the system PATH.",
+					"default": "bugstalker",
+					"type": "string",
+					"scope": "resource"
+				},
+				"bugstalker.logFile": {
+					"description": "Optional path. When set, BugStalker writes adapter diagnostics here (passed to the binary as `--dap-log-file`).",
+					"type": "string",
+					"scope": "resource"
 				}
 			}
 		},
@@ -775,6 +786,90 @@
 							},
 							"program": "^\"\\${cargo:program}\"",
 							"args": []
+						}
+					}
+				]
+			},
+			{
+				"type": "bugstalker",
+				"label": "BugStalker (Rust)",
+				"languages": [
+					"rust"
+				],
+				"configurationAttributes": {
+					"launch": {
+						"required": [
+							"program"
+						],
+						"properties": {
+							"program": {
+								"description": "Path to the Rust binary to debug.",
+								"type": "string"
+							},
+							"args": {
+								"description": "Program arguments.",
+								"type": [
+									"array",
+									"string"
+								],
+								"default": []
+							},
+							"cwd": {
+								"description": "Program working directory.",
+								"type": "string",
+								"default": "${workspaceFolder}"
+							},
+							"env": {
+								"description": "Additional environment variables.",
+								"type": "object",
+								"patternProperties": {
+									".*": {
+										"type": "string"
+									}
+								},
+								"default": {}
+							},
+							"stopOnEntry": {
+								"description": "Stop at the program entry point after launch.",
+								"type": "boolean",
+								"default": false
+							}
+						}
+					},
+					"attach": {
+						"required": [
+							"pid"
+						],
+						"properties": {
+							"pid": {
+								"description": "Process id to attach to.",
+								"type": [
+									"integer",
+									"string"
+								]
+							}
+						}
+					}
+				},
+				"configurationSnippets": [
+					{
+						"label": "BugStalker: Launch Rust binary",
+						"body": {
+							"type": "bugstalker",
+							"request": "launch",
+							"name": "${2:Debug}",
+							"program": "^\"\\${workspaceFolder}/${1:target/debug/<your program>}\"",
+							"args": [],
+							"cwd": "^\"\\${workspaceFolder}\""
+						}
+					},
+					{
+						"label": "BugStalker: Attach by PID",
+						"body": {
+							"type": "bugstalker",
+							"request": "attach",
+							"name": "${2:Attach}",
+							"pid": "${1:1234}"
 						}
 					}
 				]

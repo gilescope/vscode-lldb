@@ -14,6 +14,7 @@ import * as diagnostics from './diagnostics';
 import * as htmlView from './htmlView';
 import * as util from './configUtils';
 import * as adapter from './novsc/adapter';
+import { getBugStalkerAdapterExecutable } from './novsc/bugstalker';
 import * as install from './install';
 import { Cargo, expandCargo } from './cargo';
 import { pickProcess } from './pickProcess';
@@ -45,6 +46,16 @@ class Extension implements DebugConfigurationProvider, DebugAdapterDescriptorFac
 
         subscriptions.push(debug.registerDebugConfigurationProvider('lldb', this));
         subscriptions.push(debug.registerDebugAdapterDescriptorFactory('lldb', this));
+
+        // BugStalker uses its own descriptor factory — stdio adapter,
+        // no LLDB libraries to locate, no Python to find.
+        const bsFactory: DebugAdapterDescriptorFactory = {
+            createDebugAdapterDescriptor: (_session, _executable) => {
+                const cfg = workspace.getConfiguration('bugstalker');
+                return getBugStalkerAdapterExecutable(cfg);
+            },
+        };
+        subscriptions.push(debug.registerDebugAdapterDescriptorFactory('bugstalker', bsFactory));
 
         subscriptions.push(commands.registerCommand('lldb.diagnose', () => this.runDiagnostics()));
         subscriptions.push(commands.registerCommand('lldb.getCargoLaunchConfigs', () => this.getCargoLaunchConfigs()));
@@ -591,5 +602,3 @@ class Extension implements DebugConfigurationProvider, DebugAdapterDescriptorFac
         return workspace.getConfiguration(key, folder?.uri);
     }
 }
-
-
