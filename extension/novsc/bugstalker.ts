@@ -1,9 +1,14 @@
-// Bridge to BugStalker's stdio DAP server. Co-exists with the
-// codelldb path; selected by `"type": "bugstalker"` in launch.json.
+// Bridge to BugStalker's stdio DAP server. Selected by
+// `"type": "bugstalker"` in launch.json.
 //
 // BugStalker speaks DAP directly over stdin/stdout when invoked
 // with `--dap`, so VS Code's `DebugAdapterExecutable` is enough —
 // no TCP handshake, no `Listening on port N` regex.
+//
+// Default executable is `bs` — the binary name `cargo install
+// bugstalker` produces (the package is `bugstalker` but the
+// `[[bin]]` is `bs`). Override via the `bugstalker.executable`
+// setting if your binary lives somewhere else.
 import {
     CancellationToken,
     DebugAdapterExecutable,
@@ -20,7 +25,7 @@ import { Cargo, expandCargo } from '../cargo';
 export function getBugStalkerAdapterExecutable(
     config: WorkspaceConfiguration,
 ): DebugAdapterExecutable {
-    const exe = config.get<string>('executable', 'bugstalker');
+    const exe = config.get<string>('executable', 'bs');
     const logFile = config.get<string>('logFile');
 
     const args: string[] = ['--dap'];
