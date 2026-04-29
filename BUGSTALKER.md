@@ -26,10 +26,28 @@ targets, use a different debugger (e.g. CodeLLDB upstream).
    Point the extension at a different binary via the
    `bugstalker.executable` setting if needed.
 
-2. Make sure the binary has the entitlements / permissions your OS
-   requires for ptrace:
-   - **macOS**: `codesign -s - --entitlements ... bugstalker`
-     (BugStalker's repo carries the `.entitlements` file).
+2. Give the binary the OS permissions it needs for ptrace.
+   **Skipping this step is the most common reason BugStalker
+   "runs the program but doesn't pause on breakpoints":** the
+   debuggee is spawned correctly, but the actual
+   ptrace/`task_for_pid` attach fails silently and BugStalker
+   loses control of the process.
+
+   - **macOS**: codesign with the debugger entitlements file from
+     the BugStalker repo:
+
+     ```sh
+     codesign -s - \
+         --entitlements path/to/BugStalker/tests/darwin.entitlements \
+         --force \
+         "$(which bugstalker)"
+     ```
+
+     Verify with `codesign -d --entitlements - "$(which bugstalker)"` —
+     the output should contain `com.apple.security.cs.debugger`.
+     If the entitlement is missing you'll see
+     `Mach kr=0x00000005: KERN_FAILURE` in the adapter log and
+     `configurationDone` will fail with `Ptrace(EFAULT)`.
    - **Linux**: install with `setcap cap_sys_ptrace=ep` *or* run
      under `sudo`, *or* set `kernel.yama.ptrace_scope = 0`.
 
