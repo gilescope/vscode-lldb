@@ -14,29 +14,53 @@ DWARF-native debugger purpose-built for Rust:
   source coordinates from `DW_AT_decl_file` / `DW_AT_decl_line`.
 
 The extension itself is a thin shim: it spawns the BugStalker
-binary in stdio DAP mode (`bugstalker --dap`) and otherwise stays
-out of the way. No LLDB libraries, no Python, no platform-specific
+binary in stdio DAP mode (`bs --dap`) and otherwise stays out of
+the way. No LLDB libraries, no Python, no platform-specific
 adapter binaries to download.
 
 ## Quick start
 
-1. Install the BugStalker binary somewhere on your `PATH`:
+1. Install the BugStalker binary. The Cargo package is named
+   `bugstalker` but the produced binary is **`bs`**:
 
    ```sh
-   cargo install bugstalker
+   cargo install bugstalker        # installs ~/.cargo/bin/bs
    ```
 
-   Or build from source:
+   …or build from source:
 
    ```sh
    git clone https://github.com/gilescope/BugStalker
    cd BugStalker && cargo install --path .
    ```
 
-2. Make sure the binary has the OS permissions it needs for ptrace:
+   …or, on macOS, run the project's `+install-darwin` Earthly
+   target which does install + entitlement codesign in one step:
 
-   - **macOS**: codesign with the `task_for_pid` entitlement
-     (BugStalker's repo carries the entitlements file).
+   ```sh
+   cd ~/path/to/BugStalker
+   earthly +install-darwin         # installs ~/.cargo/bin/bs
+                                   # signed with cs.debugger
+                                   # plus a `bugstalker` symlink
+   ```
+
+   The extension's default `bugstalker.executable` setting is `bs`,
+   matching whatever any of these paths produce. Override the
+   setting if your binary lives somewhere else (e.g. an absolute
+   path to a development build).
+
+2. Make sure the binary has the OS permissions it needs for ptrace.
+   `+install-darwin` does this for you on macOS; otherwise:
+
+   - **macOS**: codesign with the `task_for_pid` entitlement —
+     BugStalker's repo carries the entitlements file:
+
+     ```sh
+     codesign -s - --force \
+         --entitlements path/to/BugStalker/tests/darwin.entitlements \
+         "$(which bs)"
+     ```
+
    - **Linux**: install with `setcap cap_sys_ptrace=ep`, run under
      `sudo`, or set `kernel.yama.ptrace_scope = 0`.
 

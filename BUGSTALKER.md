@@ -16,15 +16,20 @@ targets, use a different debugger (e.g. CodeLLDB upstream).
 
 ## One-time install
 
-1. Install the BugStalker binary:
+1. Install the BugStalker binary. The Cargo package is named
+   `bugstalker` but the produced binary is **`bs`**:
 
    ```sh
-   cargo install bugstalker            # or: cargo install --path . from the BugStalker repo
+   cargo install bugstalker            # installs ~/.cargo/bin/bs
+   # or, from a local checkout:
+   cargo install --path /path/to/BugStalker
    ```
 
-   By default the extension launches `bugstalker` from your `PATH`.
+   By default the extension launches `bs` from your `PATH`.
    Point the extension at a different binary via the
-   `bugstalker.executable` setting if needed.
+   `bugstalker.executable` setting if needed (e.g. an absolute
+   path to a development build, or `bugstalker` if you symlinked
+   under that name).
 
 2. Give the binary the OS permissions it needs for ptrace.
    **Skipping this step is the most common reason BugStalker
@@ -33,21 +38,30 @@ targets, use a different debugger (e.g. CodeLLDB upstream).
    ptrace/`task_for_pid` attach fails silently and BugStalker
    loses control of the process.
 
-   - **macOS**: codesign with the debugger entitlements file from
-     the BugStalker repo:
+   - **macOS**: easiest path is the BugStalker repo's
+     `+install-darwin` Earthly target, which combines step 1 and
+     step 2 in one go:
 
      ```sh
-     codesign -s - \
-         --entitlements path/to/BugStalker/tests/darwin.entitlements \
-         --force \
-         "$(which bugstalker)"
+     cd /path/to/BugStalker
+     earthly +install-darwin
      ```
 
-     Verify with `codesign -d --entitlements - "$(which bugstalker)"` —
+     Or do the codesign yourself against an existing `bs`:
+
+     ```sh
+     codesign -s - --force \
+         --entitlements /path/to/BugStalker/tests/darwin.entitlements \
+         "$(which bs)"
+     ```
+
+     Verify with `codesign -d --entitlements - "$(which bs)"` —
      the output should contain `com.apple.security.cs.debugger`.
      If the entitlement is missing you'll see
      `Mach kr=0x00000005: KERN_FAILURE` in the adapter log and
-     `configurationDone` will fail with `Ptrace(EFAULT)`.
+     `configurationDone` will fail with the actionable
+     `DarwinDebuggerEntitlementMissing` error in the VS Code
+     popup.
    - **Linux**: install with `setcap cap_sys_ptrace=ep` *or* run
      under `sudo`, *or* set `kernel.yama.ptrace_scope = 0`.
 
@@ -82,10 +96,11 @@ Attaching to a running process:
 
 ## Settings
 
-| Setting                 | Default      | Purpose                                                                                                     |
-| ----------------------- | ------------ | ----------------------------------------------------------------------------------------------------------- |
-| `bugstalker.executable` | `bugstalker` | Path / name of the BugStalker binary used as the DAP adapter.                                               |
-| `bugstalker.logFile`    | unset        | When set, BugStalker writes adapter diagnostics to this file (`--dap-log-file`). Useful when filing issues. |
+| Setting | Default | Purpose |
+| ------- | ------- | ------- |
+| `bugstalker.executable` | `bs`    | Path / name of the BugStalker binary used as the DAP adapter. The default matches `cargo install bugstalker` (package is `bugstalker`, bin is `bs`). |
+| `bugstalker.logFile`    | unset   | When set, BugStalker writes adapter diagnostics to this file (`--dap-log-file`). Useful when filing issues. |
+| `bugstalker.adapterEnv` | `{}`    | Extra env vars for the spawned BugStalker process and for `cargo` invocations driven by the `cargo` block. |
 
 ## What's wired up
 
@@ -145,7 +160,7 @@ The extension is a thin shim — under 200 lines of TypeScript total:
 - `extension/main.ts` registers the `bugstalker` debug adapter
   descriptor factory and the config provider.
 - `extension/novsc/bugstalker.ts` builds a `DebugAdapterExecutable`
-  that spawns `bugstalker --dap` over stdio (no TCP handshake, no
+  that spawns `bs --dap` over stdio (no TCP handshake, no
   port-scanning regex) and a `BugStalkerConfigProvider` that
   expands the `cargo` block before the adapter is spawned.
 - `extension/cargo.ts` (carried over from the upstream

@@ -79,11 +79,20 @@ lint-package-json:
     RUN jq -e '.contributes.debuggers | map(.type) | index("bugstalker") != null' \
             package.json > /dev/null \
         || { echo "package.json: missing bugstalker debug type"; exit 1; }
-    # Single debug type — LLDB is intentionally gone.
-    RUN jq -e '.contributes.debuggers | length == 1' \
+    # `lldb` is an optional second type — when present, it must be
+    # an alias for `bugstalker` (same adapter factory, same config
+    # provider) so existing CodeLLDB launch.json configs and the
+    # ones rust-analyzer auto-generates route to BugStalker without
+    # forcing users to rewrite their workflow. We don't enforce
+    # the alias from package.json — registration happens in
+    # extension/main.ts — but we do reject a third type sneaking in.
+    RUN jq -e '.contributes.debuggers | length <= 2 \
+                and (map(.type) | all(. == "bugstalker" or . == "lldb"))' \
             package.json > /dev/null \
-        || { echo "package.json: more than one debug type registered"; exit 1; }
-    RUN jq -e '.contributes.debuggers[0].configurationAttributes.launch.properties.cargo != null' \
+        || { echo "package.json: only `bugstalker` and (optionally) `lldb` debug types are allowed"; exit 1; }
+    RUN jq -e '.contributes.debuggers[]
+                | select(.type == "bugstalker")
+                | .configurationAttributes.launch.properties.cargo != null' \
             package.json > /dev/null \
         || { echo "package.json: bugstalker launch missing cargo property"; exit 1; }
     RUN jq -e '.contributes.configuration.properties["bugstalker.executable"] != null' \
