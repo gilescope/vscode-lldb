@@ -104,7 +104,51 @@ bs-gate:
     BUILD +lint-markdown
     BUILD +typecheck
 
+# Detached GPG signature over the .vsix output.
+#
+# Runs on the host (LOCALLY) — Earthly's container builds can't
+# reach the GPG agent socket or talk to a yubikey pinentry, so
+# signing has to happen outside the sandbox.
+#
+# Key selection, in priority order:
+#   1. earthly --GPG_KEY=<long-id> +sign-vsix
+#   2. git config user.signingkey (the typical case — matches the
+#      key already used to sign commits)
+#   3. GPG's default identity
+#
+# Produces build/vscode-bugstalker.vsix.asc alongside the .vsix.
+# The detached signature is round-tripped through `gpg --verify`
+# before the target exits so a bad signing pipeline fails loudly
+# instead of silently producing a corrupt .asc.
+#
+# Heads-up: with a yubikey this will prompt for a touch.
+sign-vsix:
+    LOCALLY
+    ARG GPG_KEY=
+    BUILD +vsix
+    RUN set -e; \
+        key="${GPG_KEY:-$(git config --get user.signingkey 2>/dev/null || true)}"; \
+        if [ -n "$key" ]; then \
+            gpg --detach-sign --armor --yes \
+                --local-user "$key" \
+                --output build/vscode-bugstalker.vsix.asc \
+                build/vscode-bugstalker.vsix; \
+        else \
+            gpg --detach-sign --armor --yes \
+                --output build/vscode-bugstalker.vsix.asc \
+                build/vscode-bugstalker.vsix; \
+        fi; \
+        gpg --verify build/vscode-bugstalker.vsix.asc build/vscode-bugstalker.vsix; \
+        echo "[+sign-vsix] signed → build/vscode-bugstalker.vsix.asc"
+
 all:
     BUILD +bs-gate
     BUILD +webpack
     BUILD +vsix
+
+# Release target: gate + unsigned .vsix + detached GPG signature.
+# Use this when cutting a build to publish; +all stays touch-free
+# for day-to-day work.
+release:
+    BUILD +all
+    BUILD +sign-vsix
