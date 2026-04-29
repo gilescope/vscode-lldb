@@ -79,6 +79,35 @@ npm run typecheck          # tsc --noEmit only
 `earthly +bs-gate` (or `+all`) runs the same gate the Earthfile-
 based CI uses.
 
+## Cutting a signed release
+
+```sh
+earthly +release           # +all + GPG-detached signature on the .vsix
+```
+
+`+release` runs `+all` (lint + typecheck + webpack + vsix) and
+then `+sign-vsix`, which is a `LOCALLY` target — it runs on the
+host so it can reach your GPG agent / yubikey pinentry. Output:
+
+- `build/vscode-bugstalker.vsix`
+- `build/vscode-bugstalker.vsix.asc` (GPG detached, ASCII-armoured)
+
+Signing key selection, in priority order:
+
+1. `earthly --GPG_KEY=<long-id> +sign-vsix` — explicit override
+2. `git config user.signingkey` — the same key you sign commits
+   with; the typical case
+3. GPG's default identity, otherwise
+
+`+sign-vsix` round-trips the signature through `gpg --verify`
+before exiting, so a bad signing pipeline fails loudly instead of
+silently producing a corrupt `.asc`. With a yubikey backing the
+key, the target will prompt for a touch.
+
+Day-to-day work stays touch-free — `+all` deliberately omits
+signing. Only invoke `+release` (or `+sign-vsix` directly) when
+you actually want a signed artefact.
+
 ## License
 
 MIT. Forked from [`vadimcn/vscode-lldb`](https://github.com/vadimcn/vscode-lldb)
