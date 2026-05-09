@@ -14,24 +14,53 @@ import {
     DebugAdapterExecutable,
     DebugConfiguration,
     DebugConfigurationProvider,
+    ExtensionContext,
     WorkspaceConfiguration,
     WorkspaceFolder,
     window,
     workspace,
 } from 'vscode';
+import * as fs from 'fs';
+import * as path from 'path';
 import stringArgv from 'string-argv';
 import { Cargo, expandCargo } from '../cargo';
+import { output } from '../main';
+import { ensureBsEntitled } from './darwinSign';
 
-export function getBugStalkerAdapterExecutable(
+// Resolve a log path even when the user hasn't set `bugstalker.logFile`.
+// Without a log file the BugStalker binary's diagnostics go nowhere
+// (DAP traffic is on stdin/stdout, stderr is consumed by VS Code's
+// adapter plumbing) and "ran but didn't break" failures become opaque.
+// Default to a deterministic per-extension path so there's always
+// something to tail.
+function defaultLogFile(context: ExtensionContext | undefined): string | undefined {
+    if (!context) return undefined;
+    const dir = context.logUri?.fsPath ?? context.globalStorageUri?.fsPath;
+    if (!dir) return undefined;
+    try { fs.mkdirSync(dir, { recursive: true }); } catch { /* best effort */ }
+    return path.join(dir, 'bugstalker-dap.log');
+}
+
+export async function getBugStalkerAdapterExecutable(
     config: WorkspaceConfiguration,
-): DebugAdapterExecutable {
+    context?: ExtensionContext,
+): Promise<DebugAdapterExecutable> {
     const exe = config.get<string>('executable', 'bs');
-    const logFile = config.get<string>('logFile');
+    const logFile = config.get<string>('logFile') || defaultLogFile(context);
 
     const args: string[] = ['--dap'];
     if (logFile) {
         args.push('--dap-log-file', logFile);
     }
+
+    output.appendLine(
+        `[${new Date().toISOString()}] adapter spawn exe=${exe} args=${JSON.stringify(args)}`,
+    );
+
+    // Best-effort: ensure the macOS cs.debugger entitlement is in
+    // place before spawning. Never throws — if signing fails, bs
+    // starts anyway and surfaces its own descriptive error.
+    await ensureBsEntitled(exe, output);
 
     return new DebugAdapterExecutable(exe, args);
 }

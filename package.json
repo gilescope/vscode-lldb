@@ -1,8 +1,8 @@
 {
-    "name": "vscode-bugstalker",
+    "name": "vscode-lldb",
     "displayName": "BugStalker",
     "version": "0.1.0",
-    "publisher": "gilescope",
+    "publisher": "vadimcn",
     "description": "Pure-Rust Rust debugger — DWARF-native, vtable-driven dyn Trait recovery, niche-resilient enums, async await-trace.",
     "license": "MIT",
     "icon": "images/bugstalker.png",
@@ -44,7 +44,8 @@
     "main": "out/extension.js",
     "activationEvents": [
         "onDebug",
-        "onDebugResolve:bugstalker"
+        "onDebugResolve:bugstalker",
+        "onDebugResolve:lldb"
     ],
     "contributes": {
         "languages": [],
@@ -53,13 +54,35 @@
                 "language": "rust"
             }
         ],
+        "keybindings": [
+            {
+                "command": "workbench.action.debug.stepOver",
+                "key": "alt+down",
+                "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+            },
+            {
+                "command": "workbench.action.debug.stepInto",
+                "key": "alt+right",
+                "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+            },
+            {
+                "command": "workbench.action.debug.stepOut",
+                "key": "alt+left",
+                "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+            },
+            {
+                "command": "workbench.action.debug.stepBack",
+                "key": "alt+up",
+                "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+            }
+        ],
         "configuration": {
             "type": "object",
             "title": "BugStalker",
             "properties": {
                 "bugstalker.executable": {
-                    "description": "Path to the BugStalker binary used as the DAP adapter. Defaults to looking up `bugstalker` on the system PATH.",
-                    "default": "bugstalker",
+                    "description": "Path to the BugStalker binary used as the DAP adapter. Defaults to looking up `bs` on the system PATH.",
+                    "default": "bs",
                     "type": "string",
                     "scope": "resource"
                 },
@@ -223,6 +246,103 @@
                         }
                     }
                 ]
+            },
+            {
+                "type": "lldb",
+                "label": "BugStalker (CodeLLDB-compatible)",
+                "languages": [
+                    "rust"
+                ],
+                "configurationAttributes": {
+                    "launch": {
+                        "properties": {
+                            "program": {
+                                "description": "Path to the Rust binary to debug.",
+                                "type": "string"
+                            },
+                            "cargo": {
+                                "description": "Cargo invocation parameters. The build artifact path replaces ${cargo:program} (and fills `program` if it's empty).",
+                                "type": "object",
+                                "properties": {
+                                    "args": {
+                                        "type": "array",
+                                        "default": [
+                                            "build"
+                                        ]
+                                    },
+                                    "filter": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {
+                                                "type": "string"
+                                            },
+                                            "kind": {
+                                                "type": "string"
+                                            }
+                                        }
+                                    }
+                                },
+                                "required": [
+                                    "args"
+                                ]
+                            },
+                            "args": {
+                                "description": "Program arguments.",
+                                "type": [
+                                    "array",
+                                    "string"
+                                ],
+                                "default": []
+                            },
+                            "cwd": {
+                                "description": "Program working directory.",
+                                "type": "string",
+                                "default": "${workspaceFolder}"
+                            },
+                            "env": {
+                                "description": "Additional environment variables.",
+                                "type": "object",
+                                "patternProperties": {
+                                    ".*": {
+                                        "type": "string"
+                                    }
+                                },
+                                "default": {}
+                            },
+                            "stopOnEntry": {
+                                "description": "Stop at the program entry point after launch.",
+                                "type": "boolean",
+                                "default": false
+                            },
+                            "sourceMap": {
+                                "description": "Source-path remap (CodeLLDB-compatible).",
+                                "type": "object",
+                                "default": {}
+                            },
+                            "sourceLanguages": {
+                                "description": "Source languages hint (CodeLLDB-compatible, ignored by BugStalker).",
+                                "type": "array",
+                                "default": [
+                                    "rust"
+                                ]
+                            }
+                        }
+                    },
+                    "attach": {
+                        "required": [
+                            "pid"
+                        ],
+                        "properties": {
+                            "pid": {
+                                "description": "Process id to attach to.",
+                                "type": [
+                                    "integer",
+                                    "string"
+                                ]
+                            }
+                        }
+                    }
+                }
             }
         ]
     }
