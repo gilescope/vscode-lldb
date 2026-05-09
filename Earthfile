@@ -57,18 +57,39 @@ typecheck:
 webpack:
     FROM +source
     RUN npx webpack --mode production
+    SAVE ARTIFACT out/extension.js
+    SAVE ARTIFACT out/extension.js.map
     SAVE ARTIFACT out/extension.js AS LOCAL build/extension.js
     SAVE ARTIFACT out/extension.js.map AS LOCAL build/extension.js.map
+
+# Tooling layer for vsce. Sits above +common (no source) so editing
+# extension/*.ts or README.md doesn't invalidate the npm-global
+# install of vsce.
+vsce-tooling:
+    FROM +common
+    RUN npm install -g @vscode/vsce@2.32.0
 
 # `vsce package` produces the installable .vsix. Doesn't need any
 # native binaries; the BugStalker DAP server is shipped separately
 # (`cargo install bugstalker`).
+#
+# Consumes the webpack artifact from +webpack rather than re-running
+# webpack here, so `earthly +all` builds the bundle exactly once.
+# Only the files vsce actually packages are copied in — keeps the
+# .vsix lean and avoids invalidating this layer on unrelated edits
+# (e.g. tsconfig, BUGSTALKER.md, .markdownlint-cli2.jsonc).
 vsix:
-    FROM +source
-    # Run the production webpack build in this stage so vsce sees
-    # `out/extension.js`.
-    RUN npx webpack --mode production
-    RUN npm install -g @vscode/vsce@2.32.0
+    FROM +vsce-tooling
+    COPY package.json README.md LICENSE ./
+    COPY --dir images ./
+    COPY +webpack/extension.js out/extension.js
+    # Strip the `vscode:prepublish` hook so vsce doesn't kick off a
+    # second webpack build; we already have the production bundle
+    # from +webpack. The hook is a dev-time hook only — VS Code does
+    # not invoke it after install — so dropping it from the shipped
+    # manifest is safe.
+    RUN jq 'del(.scripts["vscode:prepublish"])' package.json > package.json.new \
+        && mv package.json.new package.json
     RUN vsce package --no-dependencies --skip-license -o vscode-bugstalker.vsix
     SAVE ARTIFACT vscode-bugstalker.vsix AS LOCAL build/vscode-bugstalker.vsix
 
@@ -149,6 +170,34 @@ sign-vsix:
         fi; \
         gpg --verify build/vscode-bugstalker.vsix.asc build/vscode-bugstalker.vsix; \
         echo "[+sign-vsix] signed → build/vscode-bugstalker.vsix.asc"
+
+# Install the freshly built .vsix into a local VS Code variant.
+#
+# Runs LOCALLY because Earthly's containers can't reach the host's
+# VS Code CLI or extension store. Pass EDITOR=cursor (etc.) to
+# install into a different variant; default is plain `code`.
+#
+#   earthly +install                # → code --install-extension …
+#   earthly --EDITOR=cursor +install
+install:
+    LOCALLY
+    ARG EDITOR=code
+    BUILD +vsix
+    # Uninstall any prior `vadimcn.vscode-lldb` (real CodeLLDB or a
+    # previous BugStalker build) before installing. VS Code keeps
+    # every installed version on disk and activates the highest
+    # semver, so without this step a stale CodeLLDB v1.12.x will
+    # shadow our 0.1.0 fork and the user sees no BugStalker output
+    # at all (real CodeLLDB silently fails because we don't ship
+    # its bundled native adapter binary).
+    RUN set -e; \
+        if ! command -v "$EDITOR" >/dev/null 2>&1; then \
+            echo "[+install] '$EDITOR' not found on PATH — set --EDITOR=<binary>"; \
+            exit 1; \
+        fi; \
+        "$EDITOR" --uninstall-extension vadimcn.vscode-lldb >/dev/null 2>&1 || true; \
+        "$EDITOR" --install-extension build/vscode-bugstalker.vsix --force; \
+        echo "[+install] installed build/vscode-bugstalker.vsix into $EDITOR"
 
 all:
     BUILD +bs-gate
