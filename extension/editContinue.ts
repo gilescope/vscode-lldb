@@ -434,6 +434,11 @@ async function runEditContinue(): Promise<void> {
             const readonly = response?.entriesSkippedReadonly ?? 0;
             const summary = `patched ${entries} entries, ${bytes} bytes, ${drift} skipped (drift), ${readonly} skipped (read-only)`;
             output.appendLine(`[enc] ${summary}`);
+            const restartedFnStart = response?.restartedFrameFnStart;
+            if (typeof restartedFnStart == 'number' || (restartedFnStart != null && restartedFnStart !== undefined)) {
+                const fnHex = '0x' + Number(restartedFnStart).toString(16);
+                output.appendLine(`[enc] auto-restarted top frame at ${fnHex} (patch landed in the currently-paused function)`);
+            }
             const driftDetails: any[] = response?.driftDetails ?? [];
             if (driftDetails.length > 0) {
                 output.appendLine(`[enc] drift: the running process's bytes don't match wild's "old bytes" — typical cause is a cargo-hash mismatch between what CodeLLDB launched and what the watcher rebuilt:`);
