@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as ver from 'extension/novsc/ver';
 import { expandVariables, mergeValues } from 'extension/novsc/expand';
+import { __test as editContinue } from 'extension/editContinue';
 import YAML from 'yaml';
 
 suite('Versions', () => {
@@ -44,6 +45,18 @@ suite('Util', () => {
         assert.deepEqual(mergeValues(
             { a: 1, b: 2, }, { b: 20, c: 40 }),
             { a: 1, b: 2, c: 40 });
+    });
+
+    test('edit-and-continue cargo rebuild args', async () => {
+        assert.deepEqual(
+            editContinue.editContinueRebuildCargoArgs(['run', '--bin', 'demo', '--', 'arg']),
+            ['build', '--bin', 'demo']);
+        assert.deepEqual(
+            editContinue.editContinueRebuildCargoArgs(['test', '-p', 'bs-viz-spec', '--lib', '--', '--nocapture']),
+            ['test', '-p', 'bs-viz-spec', '--lib', '--no-run']);
+        assert.deepEqual(
+            editContinue.ensureCargoTarget(['test', '--lib', '--', '--nocapture'], 'aarch64-apple-darwin'),
+            ['test', '--lib', '--target', 'aarch64-apple-darwin', '--', '--nocapture']);
     });
 })
 

@@ -30,6 +30,7 @@ import { output, showErrorWithLog } from './logging';
 import { LLDBCommandTool, SessionInfoTool } from './vibeDebug';
 import { alternateBackend, selfTest, commandPrompt } from './adapterUtils';
 import { expandVSCodeVariables } from './configUtils';
+import { configureEditContinueCargo, registerEditContinue } from './editContinue';
 
 export function getExtensionConfig(scope?: ConfigurationScope, subkey?: string): WorkspaceConfiguration {
     let key = 'lldb';
@@ -87,6 +88,7 @@ class Extension implements DebugAdapterDescriptorFactory {
         subscriptions.push(commands.registerCommand('lldb.alternateBackend', () => alternateBackend(this.context.extensionPath)));
         subscriptions.push(commands.registerCommand('lldb.selfTest', () => this.runSelfTest()));
         subscriptions.push(commands.registerCommand('lldb.commandPrompt', () => commandPrompt(this.context.extensionPath)));
+        registerEditContinue(context);
 
         subscriptions.push(workspace.onDidChangeConfiguration(event => {
             if (event.affectsConfiguration('lldb.rpcServer')) {
@@ -303,6 +305,7 @@ class Extension implements DebugAdapterDescriptorFactory {
         cancellation?: CancellationToken
     ): Promise<DebugConfiguration | undefined | null> {
         if (debugConfig.cargo) {
+            configureEditContinueCargo(folder, debugConfig);
             let cargo = new Cargo(folder, cancellation);
             let launcher = path.join(this.context.extensionPath, 'bin', 'codelldb-launch');
             debugConfig = await cargo.resolveCargoConfig(debugConfig, launcher);

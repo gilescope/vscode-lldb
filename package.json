@@ -130,6 +130,24 @@
 			},
 			{
 				"category": "LLDB",
+				"title": "Apply Edit-and-Continue Patch",
+				"command": "lldb.applyPatch",
+				"enablement": "debugType == 'lldb'"
+			},
+			{
+				"category": "LLDB",
+				"title": "Start Edit and Continue",
+				"command": "lldb.startEditContinue",
+				"enablement": "debugType == 'lldb'"
+			},
+			{
+				"category": "LLDB",
+				"title": "Stop Edit and Continue",
+				"command": "lldb.stopEditContinue",
+				"enablement": "debugType == 'lldb'"
+			},
+			{
+				"category": "LLDB",
 				"title": "Search Symbols...",
 				"command": "lldb.symbols",
 				"enablement": "debugType == 'lldb'"
@@ -772,6 +790,46 @@
 												"additionalProperties": false
 											}
 										]
+									},
+									"editContinue": {
+										"description": "Enable BugStalker edit-and-continue for supported Cargo launches. Set false to opt out.",
+										"type": "boolean",
+										"default": true
+									},
+									"editContinueCommand": {
+										"description": "Command to rebuild and emit a BugStalker wild patch.",
+										"type": "string"
+									},
+									"editContinuePatchPath": {
+										"description": "Path to the wild patch emitted by edit-and-continue rebuilds.",
+										"type": "string"
+									},
+									"editContinueLinker": {
+										"description": "Path to the wild linker used for edit-and-continue builds.",
+										"type": "string"
+									},
+									"editContinueTarget": {
+										"description": "Cargo target triple used for edit-and-continue builds.",
+										"type": "string"
+									},
+									"editContinueWatch": {
+										"description": "File glob or globs that trigger edit-and-continue rebuilds.",
+										"type": [ "string", "array" ],
+										"items": { "type": "string" },
+										"default": [ "**/*.rs" ]
+									},
+									"editContinueCwd": {
+										"description": "Working directory for edit-and-continue rebuilds.",
+										"type": "string"
+									},
+									"editContinueDebounceMs": {
+										"description": "Delay before rebuilding after a watched file changes.",
+										"type": "number",
+										"default": 150
+									},
+									"editContinueBase": {
+										"description": "Optional base address or identifier forwarded with bs/applyPatch.",
+										"type": [ "string", "number" ]
 									}
 								}
 							}
