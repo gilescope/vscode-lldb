@@ -76,6 +76,184 @@ export function registerEditContinue(context: ExtensionContext) {
     }));
 }
 
+/// True if `program` looks like the temp binary rust-analyzer's
+/// "Debug" code lens produces — typically `/tmp/ra/debug/<binname>`
+/// on macOS/Linux. RA puts these in its own `CARGO_TARGET_DIR` so
+/// they don't collide with the user's `cargo build` artifacts. The
+/// downside for EnC: the launched binary lives at one path while
+/// the watcher's incremental rebuilds land in the project's normal
+/// target dir — guaranteed 100% drift on every patch byte. We
+/// detect this case and rebuild in the project's target dir before
+/// launch, so launch and watcher agree.
+function isRustAnalyzerTempProgram(program: unknown): boolean {
+    if (typeof program != 'string') {
+        return false;
+    }
+    const normalised = path.normalize(program);
+    const sep = path.sep;
+    return normalised.includes(`${sep}ra${sep}debug${sep}`);
+}
+
+/// When `program` points at rust-analyzer's temp build output and
+/// EnC is enabled, rebuild the same binary in the project's normal
+/// target dir using wild + our pinned RUSTFLAGS, then redirect
+/// `debugConfig.program` at the project-target binary. This ensures
+/// the launched process and the watcher's rebuilds share a target
+/// dir and produce byte-identical artifacts.
+///
+/// Returns `true` if it took action (caller should not fall through
+/// to other handlers), `false` if the launch wasn't a RA-temp case.
+export async function configureEditContinueForRustAnalyzerTemp(
+    folder: WorkspaceFolder | undefined,
+    debugConfig: DebugConfiguration,
+): Promise<boolean> {
+    if (!editContinueEnabled(debugConfig)) {
+        return false;
+    }
+    if (debugConfig.editContinueCommand) {
+        return false;
+    }
+    if (!isRustAnalyzerTempProgram(debugConfig.program)) {
+        return false;
+    }
+
+    const cargoCwd = expandConfigString(
+        debugConfig.cwd ?? folder?.uri.fsPath ?? workspace.workspaceFolders?.[0]?.uri.fsPath,
+        folder,
+        debugConfig,
+    );
+    if (!cargoCwd) {
+        output.appendLine(`[enc] RA-temp redirect skipped: no cargo cwd resolvable from launch config`);
+        return false;
+    }
+
+    const binName = path.basename(debugConfig.program);
+    const patchPath =
+        expandConfigString(
+            debugConfig.editContinuePatchPath ?? `${cargoCwd}/target/bugstalker.wild-patch`,
+            folder,
+            debugConfig,
+        ) ?? `${cargoCwd}/target/bugstalker.wild-patch`;
+    const target = debugConfig.editContinueTarget ?? defaultEditContinueTarget();
+    const linker = resolveEditContinueLinker(debugConfig, cargoCwd);
+    const cargoArgs = ensureCargoTarget(['build', '--bin', binName], target);
+
+    debugConfig.editContinuePatchPath = patchPath;
+    debugConfig._bugstalkerCargoArgs = cargoArgs;
+    debugConfig._bugstalkerCargoCwd = cargoCwd;
+    debugConfig._bugstalkerEditContinueLinker = linker;
+    debugConfig._bugstalkerEditContinueTarget = target;
+    debugConfig._bugstalkerEditContinueAutoConfigured = true;
+
+    const prebuilt = await prebuildEditContinueBinary(debugConfig);
+    if (!prebuilt) {
+        output.appendLine(`[enc] RA-temp redirect: prebuild failed; leaving program at ${debugConfig.program} (drift expected on patch apply)`);
+        return false;
+    }
+    output.appendLine(`[enc] RA-temp redirect: ${debugConfig.program} → ${prebuilt} (now matches watcher target dir)`);
+    debugConfig.program = prebuilt;
+    return true;
+}
+
+/// Build the EnC debuggee ourselves, ahead of CodeLLDB's own cargo
+/// flow, and return the absolute path of the resulting executable.
+///
+/// **Why we duplicate the work**: CodeLLDB's `cargo.resolveCargoConfig`
+/// passes `cargo.env` through to its spawned cargo, but in practice
+/// the launched binary and the watcher's incremental rebuilds have
+/// landed on different cargo hashes — symptom: `apply-patch` reports
+/// 100% drift because the running process and wild's incremental
+/// baseline are two completely different binaries with different
+/// segment layouts. The exact divergence (different rustc inputs,
+/// different config-file precedence, a stale `RUSTFLAGS` env var the
+/// user has globally set, …) is hard to pin down. We sidestep it by
+/// running the *exact same* cargo invocation the watcher would and
+/// using its artifact directly.
+///
+/// Returns the executable path on success, or `undefined` (after
+/// logging) on any failure — the caller falls back to CodeLLDB's
+/// cargo flow.
+export async function prebuildEditContinueBinary(
+    debugConfig: DebugConfiguration,
+): Promise<string | undefined> {
+    const cargoCwd: string | undefined = debugConfig._bugstalkerCargoCwd;
+    const cargoArgs: string[] | undefined = debugConfig._bugstalkerCargoArgs;
+    const target: string | undefined = debugConfig._bugstalkerEditContinueTarget;
+    const patchPath: string | undefined = debugConfig.editContinuePatchPath;
+
+    if (!cargoCwd || !cargoArgs || !target || !patchPath) {
+        return undefined;
+    }
+
+    const rustflags = editContinueRustflags(debugConfig, patchPath, cargoCwd);
+    const envName = cargoTargetRustflagsEnv(target);
+
+    // Full env: process.env (so PATH, HOME, etc. are present) plus
+    // our pinned RUSTFLAGS. We also strip any user-set `RUSTFLAGS`
+    // from the env, because per cargo's precedence rules a plain
+    // `RUSTFLAGS` overrides `CARGO_TARGET_<triple>_RUSTFLAGS` and
+    // would silently take wild out of the picture.
+    const env = { ...process.env, [envName]: rustflags };
+    delete (env as any).RUSTFLAGS;
+    delete (env as any).CARGO_ENCODED_RUSTFLAGS;
+
+    // Inject `--message-format=json` so we can pluck the executable
+    // path out of cargo's stream. Insert before any `--` separator.
+    const args = cargoArgs.slice();
+    if (!args.includes('--message-format=json')) {
+        const sep = args.indexOf('--');
+        if (sep >= 0) {
+            args.splice(sep, 0, '--message-format=json');
+        } else {
+            args.push('--message-format=json');
+        }
+    }
+
+    output.appendLine(`[enc] prebuild: cargo ${args.join(' ')} (cwd=${cargoCwd}, ${envName}=${rustflags})`);
+
+    return new Promise(resolve => {
+        let executable: string | undefined;
+        const cargo = cp.spawn('cargo', args, { cwd: cargoCwd, env });
+        cargo.on('error', err => {
+            output.appendLine(`[enc] prebuild failed to spawn cargo: ${err.message}`);
+            resolve(undefined);
+        });
+        cargo.stderr.on('data', chunk => output.append(chunk.toString()));
+        let stdoutBuf = '';
+        cargo.stdout.on('data', chunk => {
+            stdoutBuf += chunk.toString();
+            let nl;
+            while ((nl = stdoutBuf.indexOf('\n')) >= 0) {
+                const line = stdoutBuf.slice(0, nl);
+                stdoutBuf = stdoutBuf.slice(nl + 1);
+                if (!line.startsWith('{')) continue;
+                try {
+                    const msg = JSON.parse(line);
+                    if (msg.reason === 'compiler-artifact' && typeof msg.executable === 'string') {
+                        executable = msg.executable;
+                    }
+                } catch {
+                    // ignore — non-JSON or partial line
+                }
+            }
+        });
+        cargo.on('exit', code => {
+            if (code !== 0) {
+                output.appendLine(`[enc] prebuild: cargo exited with code ${code}; falling back to CodeLLDB cargo flow`);
+                resolve(undefined);
+                return;
+            }
+            if (!executable) {
+                output.appendLine(`[enc] prebuild: cargo finished but emitted no executable artifact; falling back to CodeLLDB cargo flow`);
+                resolve(undefined);
+                return;
+            }
+            output.appendLine(`[enc] prebuild: ready at ${executable} — using as debuggee program (cargo step bypassed)`);
+            resolve(executable);
+        });
+    });
+}
+
 export function configureEditContinueCargo(
     folder: WorkspaceFolder | undefined,
     debugConfig: DebugConfiguration,
@@ -246,10 +424,31 @@ async function runEditContinue(): Promise<void> {
             }
 
             const response = await applyPatch(state.session, state.patchPath, false, state.base, false);
+            if (response === undefined) {
+                // applyPatch already logged + surfaced the failure.
+                continue;
+            }
             const entries = response?.entriesApplied ?? 0;
             const bytes = response?.bytesWritten ?? 0;
-            const skipped = response?.entriesSkippedDrift ?? 0;
-            window.setStatusBarMessage(`BugStalker: patched ${entries} entries, ${bytes} bytes, ${skipped} skipped`, 4000);
+            const drift = response?.entriesSkippedDrift ?? 0;
+            const readonly = response?.entriesSkippedReadonly ?? 0;
+            const summary = `patched ${entries} entries, ${bytes} bytes, ${drift} skipped (drift), ${readonly} skipped (read-only)`;
+            output.appendLine(`[enc] ${summary}`);
+            const driftDetails: any[] = response?.driftDetails ?? [];
+            if (driftDetails.length > 0) {
+                output.appendLine(`[enc] drift: the running process's bytes don't match wild's "old bytes" — typical cause is a cargo-hash mismatch between what CodeLLDB launched and what the watcher rebuilt:`);
+                for (const d of driftDetails) {
+                    const sym = d.symbol ? ` ${d.symbol}` : '';
+                    output.appendLine(`[enc]   offset 0x${Number(d.offset).toString(16)} (runtime 0x${Number(d.runtimeAddr).toString(16)})${sym}: expected ${d.expectedHex}, found ${d.actualHex}`);
+                }
+                if (drift > driftDetails.length) {
+                    output.appendLine(`[enc]   ... ${drift - driftDetails.length} more drift entr${drift - driftDetails.length == 1 ? 'y' : 'ies'} not shown (capped at ${driftDetails.length})`);
+                }
+            }
+            if (entries == 0 && drift == 0 && readonly == 0) {
+                output.appendLine(`[enc] note: 0 entries applied — either the edited region produced no codegen change, or the wild patch was empty. Make a body-only edit (e.g. change a println! string) to force a real diff.`);
+            }
+            window.setStatusBarMessage(`BugStalker: ${summary}`, 4000);
         } while (state.pending);
     } finally {
         state.running = false;
@@ -558,8 +757,19 @@ function expandConfigString(
 }
 
 function execShell(command: string, cwd: string): Promise<{ code: number; stdout: string; stderr: string }> {
+    // Strip `RUSTFLAGS` / `CARGO_ENCODED_RUSTFLAGS` from the env we
+    // hand to the child shell. cargo's config-precedence makes the
+    // four flag sources mutually exclusive: a user-set `RUSTFLAGS`
+    // (from `~/.zshrc` or similar) overrides our inline
+    // `CARGO_TARGET_<triple>_RUSTFLAGS=...` and the watcher-rebuild
+    // would silently fall off wild — producing the 100%-drift symptom
+    // we hit when the launched binary and the watcher's incremental
+    // baseline disagreed on segment layout.
+    const cleanEnv = { ...process.env };
+    delete (cleanEnv as any).RUSTFLAGS;
+    delete (cleanEnv as any).CARGO_ENCODED_RUSTFLAGS;
     return new Promise(resolve => {
-        cp.exec(command, { cwd }, (error, stdout, stderr) => {
+        cp.exec(command, { cwd, env: cleanEnv }, (error, stdout, stderr) => {
             const code =
                 typeof (error as cp.ExecException | null)?.code == 'number'
                     ? ((error as cp.ExecException).code as number)

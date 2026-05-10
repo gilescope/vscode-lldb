@@ -30,7 +30,12 @@ import { output, showErrorWithLog } from './logging';
 import { LLDBCommandTool, SessionInfoTool } from './vibeDebug';
 import { alternateBackend, selfTest, commandPrompt } from './adapterUtils';
 import { expandVSCodeVariables } from './configUtils';
-import { configureEditContinueCargo, registerEditContinue } from './editContinue';
+import {
+    configureEditContinueCargo,
+    configureEditContinueForRustAnalyzerTemp,
+    prebuildEditContinueBinary,
+    registerEditContinue,
+} from './editContinue';
 
 export function getExtensionConfig(scope?: ConfigurationScope, subkey?: string): WorkspaceConfiguration {
     let key = 'lldb';
@@ -306,9 +311,32 @@ class Extension implements DebugAdapterDescriptorFactory {
     ): Promise<DebugConfiguration | undefined | null> {
         if (debugConfig.cargo) {
             configureEditContinueCargo(folder, debugConfig);
-            let cargo = new Cargo(folder, cancellation);
-            let launcher = path.join(this.context.extensionPath, 'bin', 'codelldb-launch');
-            debugConfig = await cargo.resolveCargoConfig(debugConfig, launcher);
+            // Prefer building the EnC debuggee ourselves so the
+            // launched binary is byte-identical to what the watcher
+            // will rebuild against. Falls back to CodeLLDB's cargo
+            // flow on any failure (including the case where EnC
+            // wasn't auto-configured for this launch).
+            let prebuilt: string | undefined;
+            if (debugConfig._bugstalkerEditContinueAutoConfigured === true) {
+                prebuilt = await prebuildEditContinueBinary(debugConfig);
+            }
+            if (prebuilt) {
+                debugConfig.program = prebuilt;
+                delete debugConfig.cargo;
+            } else {
+                let cargo = new Cargo(folder, cancellation);
+                let launcher = path.join(this.context.extensionPath, 'bin', 'codelldb-launch');
+                debugConfig = await cargo.resolveCargoConfig(debugConfig, launcher);
+            }
+        } else {
+            // No cargo block — but if `program` points at
+            // rust-analyzer's temp build dir (`/tmp/ra/debug/<bin>`)
+            // and EnC is enabled, rebuild in the project's target
+            // dir so launch and watcher artifacts agree. Without
+            // this, RA-style "Debug" lens launches drift 100% on
+            // every patch apply because launch and watcher use
+            // different `CARGO_TARGET_DIR`s.
+            await configureEditContinueForRustAnalyzerTemp(folder, debugConfig);
         }
         if (cancellation?.isCancellationRequested)
             return undefined;
