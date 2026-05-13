@@ -30,10 +30,13 @@ import {
     window,
     workspace,
 } from 'vscode';
-import { spawn } from 'child_process';
+import { spawn, execFile } from 'child_process';
+import { promisify } from 'util';
 import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
+
+const execFileAsync = promisify(execFile);
 import stringArgv from 'string-argv';
 import { Cargo, expandCargo } from '../cargo';
 import { output } from '../main';
@@ -43,6 +46,17 @@ import {
     configureEditContinueForRustAnalyzerTemp,
     prebuildEditContinueBinary,
 } from '../editContinue';
+
+async function resolveAbsoluteExe(bin: string): Promise<string | undefined> {
+    if (path.isAbsolute(bin)) return bin;
+    try {
+        const { stdout } = await execFileAsync('/usr/bin/which', [bin]);
+        const first = stdout.toString().split('\n')[0]?.trim();
+        return first && first.length > 0 ? first : undefined;
+    } catch {
+        return undefined;
+    }
+}
 
 function defaultLogFile(context: ExtensionContext | undefined): string | undefined {
     if (!context) return undefined;
@@ -65,8 +79,11 @@ export async function getBugStalkerAdapterExecutable(
         args.push('--dap-log-file', logFile);
     }
 
+    const resolvedExe = await resolveAbsoluteExe(exe);
     output.appendLine(
-        `[${new Date().toISOString()}] adapter spawn exe=${exe} args=${JSON.stringify(args)}`,
+        `[${new Date().toISOString()}] adapter spawn exe=${exe}${
+            resolvedExe && resolvedExe !== exe ? ` (resolved: ${resolvedExe})` : ''
+        } args=${JSON.stringify(args)}`,
     );
 
     // Best-effort: ensure the macOS cs.debugger entitlement is in
