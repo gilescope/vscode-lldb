@@ -45,13 +45,51 @@
     "activationEvents": [
         "onDebug",
         "onDebugResolve:bugstalker",
-        "onDebugResolve:lldb"
+        "onDebugResolve:lldb",
+        "onCommand:bugstalker.applyPatch",
+        "onCommand:bugstalker.startEditContinue",
+        "onCommand:bugstalker.stopEditContinue",
+        "onCommand:lldb.applyPatch",
+        "onCommand:lldb.startEditContinue",
+        "onCommand:lldb.stopEditContinue"
     ],
     "contributes": {
         "languages": [],
         "breakpoints": [
             {
                 "language": "rust"
+            }
+        ],
+        "commands": [
+            {
+                "category": "BugStalker",
+                "command": "bugstalker.applyPatch",
+                "title": "Apply Patch"
+            },
+            {
+                "category": "BugStalker",
+                "command": "bugstalker.startEditContinue",
+                "title": "Start Edit and Continue"
+            },
+            {
+                "category": "BugStalker",
+                "command": "bugstalker.stopEditContinue",
+                "title": "Stop Edit and Continue"
+            },
+            {
+                "category": "BugStalker",
+                "command": "lldb.applyPatch",
+                "title": "Apply Patch"
+            },
+            {
+                "category": "BugStalker",
+                "command": "lldb.startEditContinue",
+                "title": "Start Edit and Continue"
+            },
+            {
+                "category": "BugStalker",
+                "command": "lldb.stopEditContinue",
+                "title": "Stop Edit and Continue"
             }
         ],
         "keybindings": [
@@ -173,6 +211,46 @@
                                 "description": "Stop at the program entry point after launch.",
                                 "type": "boolean",
                                 "default": false
+                            },
+                            "editContinue": {
+                                "description": "Enable BugStalker edit-and-continue for supported Cargo launches. Set false to opt out.",
+                                "type": "boolean",
+                                "default": true
+                            },
+                            "editContinueCommand": {
+                                "description": "Command to rebuild and emit a BugStalker wild patch.",
+                                "type": "string"
+                            },
+                            "editContinuePatchPath": {
+                                "description": "Path to the wild patch file produced by the rebuild command.",
+                                "type": "string"
+                            },
+                            "editContinueLinker": {
+                                "description": "Path to the wild linker binary.",
+                                "type": "string"
+                            },
+                            "editContinueTarget": {
+                                "description": "Cargo target triple for the EnC rebuild (default: host triple).",
+                                "type": "string"
+                            },
+                            "editContinueWatch": {
+                                "description": "Globs (relative to editContinueCwd) the watcher reacts to.",
+                                "type": [ "string", "array" ],
+                                "items": { "type": "string" },
+                                "default": [ "**/*.rs" ]
+                            },
+                            "editContinueCwd": {
+                                "description": "Working directory for the EnC rebuild command.",
+                                "type": "string"
+                            },
+                            "editContinueDebounceMs": {
+                                "description": "Debounce window (ms) for the file-system watcher.",
+                                "type": "number",
+                                "default": 150
+                            },
+                            "editContinueBase": {
+                                "description": "Base for the wild patch (function symbol or address).",
+                                "type": [ "string", "number" ]
                             }
                         }
                     },
