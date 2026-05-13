@@ -15,11 +15,14 @@ import {
     getBugStalkerAdapterExecutable,
 } from './novsc/bugstalker';
 import { BugStalkerTrackerFactory } from './novsc/tracker';
+import { registerEditContinue } from './editContinue';
 
 export const output = window.createOutputChannel('BugStalker');
 
 export function activate(context: ExtensionContext): void {
     const subscriptions = context.subscriptions;
+
+    registerEditContinue(context);
 
     const adapterFactory: DebugAdapterDescriptorFactory = {
         createDebugAdapterDescriptor: (_session, _executable) => {

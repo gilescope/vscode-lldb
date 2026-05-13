@@ -1,9 +1,18 @@
 // Bridge to BugStalker's stdio DAP server. Selected by
 // `"type": "bugstalker"` in launch.json.
 //
-// BugStalker speaks DAP directly over stdin/stdout when invoked
-// with `--dap`, so VS Code's `DebugAdapterExecutable` is enough —
-// no TCP handshake, no `Listening on port N` regex.
+// Why we spawn bs ourselves (instead of returning
+// `DebugAdapterExecutable`): when VS Code spawns the adapter via
+// `DebugAdapterExecutable`, **its stderr is discarded** — only stdin
+// /stdout are wired through. Panics, `tracing` output, and the
+// adapter's own diagnostic prints all vanish, leaving the user with
+// "the debugger died and there's no log."
+//
+// Fix: spawn bs ourselves with all three streams piped, open a
+// loopback TCP server, and bridge socket <-> bs.stdin/stdout. bs's
+// stderr goes straight into the BugStalker output channel. Returning
+// `DebugAdapterServer` instead of `DebugAdapterExecutable` is what
+// lets VS Code connect via that loopback port.
 //
 // Default executable is `bs` — the binary name `cargo install
 // bugstalker` produces (the package is `bugstalker` but the
@@ -11,7 +20,8 @@
 // setting if your binary lives somewhere else.
 import {
     CancellationToken,
-    DebugAdapterExecutable,
+    DebugAdapterDescriptor,
+    DebugAdapterServer,
     DebugConfiguration,
     DebugConfigurationProvider,
     ExtensionContext,
@@ -20,19 +30,20 @@ import {
     window,
     workspace,
 } from 'vscode';
+import { spawn } from 'child_process';
+import * as net from 'net';
 import * as fs from 'fs';
 import * as path from 'path';
 import stringArgv from 'string-argv';
 import { Cargo, expandCargo } from '../cargo';
 import { output } from '../main';
 import { ensureBsEntitled } from './darwinSign';
+import {
+    configureEditContinueCargo,
+    configureEditContinueForRustAnalyzerTemp,
+    prebuildEditContinueBinary,
+} from '../editContinue';
 
-// Resolve a log path even when the user hasn't set `bugstalker.logFile`.
-// Without a log file the BugStalker binary's diagnostics go nowhere
-// (DAP traffic is on stdin/stdout, stderr is consumed by VS Code's
-// adapter plumbing) and "ran but didn't break" failures become opaque.
-// Default to a deterministic per-extension path so there's always
-// something to tail.
 function defaultLogFile(context: ExtensionContext | undefined): string | undefined {
     if (!context) return undefined;
     const dir = context.logUri?.fsPath ?? context.globalStorageUri?.fsPath;
@@ -44,9 +55,10 @@ function defaultLogFile(context: ExtensionContext | undefined): string | undefin
 export async function getBugStalkerAdapterExecutable(
     config: WorkspaceConfiguration,
     context?: ExtensionContext,
-): Promise<DebugAdapterExecutable> {
+): Promise<DebugAdapterDescriptor> {
     const exe = config.get<string>('executable', 'bs');
     const logFile = config.get<string>('logFile') || defaultLogFile(context);
+    const adapterEnv = config.get<{ [k: string]: string }>('adapterEnv', {});
 
     const args: string[] = ['--dap'];
     if (logFile) {
@@ -62,7 +74,91 @@ export async function getBugStalkerAdapterExecutable(
     // starts anyway and surfaces its own descriptive error.
     await ensureBsEntitled(exe, output);
 
-    return new DebugAdapterExecutable(exe, args);
+    const env: NodeJS.ProcessEnv = { ...process.env, ...adapterEnv };
+    if (!env.RUST_BACKTRACE) env.RUST_BACKTRACE = '1';
+
+    const child = spawn(exe, args, {
+        stdio: ['pipe', 'pipe', 'pipe'],
+        env,
+    });
+
+    const stderrPrefix = '[bs] ';
+    let stderrBuf = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+        stderrBuf += chunk.toString('utf8');
+        let nl: number;
+        while ((nl = stderrBuf.indexOf('\n')) >= 0) {
+            const line = stderrBuf.slice(0, nl);
+            stderrBuf = stderrBuf.slice(nl + 1);
+            output.appendLine(stderrPrefix + line);
+        }
+    });
+    child.stderr.on('end', () => {
+        if (stderrBuf.length > 0) {
+            output.appendLine(stderrPrefix + stderrBuf);
+            stderrBuf = '';
+        }
+    });
+
+    child.on('error', err => {
+        output.appendLine(`[bs] spawn error: ${err.message}`);
+        output.show(true);
+    });
+    child.on('exit', (code, signal) => {
+        output.appendLine(`[bs] exited code=${code ?? 'null'} signal=${signal ?? 'null'}`);
+        if ((code !== null && code !== 0) || signal) {
+            output.show(true);
+        }
+    });
+
+    const server = net.createServer(socket => {
+        // Single client per session — stop accepting once VS Code
+        // attaches. Closing the server early means
+        // `server.close()` on shutdown only has to flush the listener.
+        server.close();
+        socket.on('error', err => output.appendLine(`[bs] socket error: ${err.message}`));
+
+        if (!child.stdout || !child.stdin) {
+            output.appendLine('[bs] child stdio unavailable; closing socket');
+            socket.destroy();
+            return;
+        }
+        child.stdout.pipe(socket);
+        socket.pipe(child.stdin);
+
+        const teardown = () => {
+            if (!child.killed && child.exitCode === null) {
+                try { child.kill(); } catch { /* already gone */ }
+            }
+        };
+        socket.on('close', teardown);
+        socket.on('end', teardown);
+    });
+
+    server.on('error', err => {
+        output.appendLine(`[bs] bridge server error: ${err.message}`);
+        output.show(true);
+    });
+
+    const port: number = await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => {
+            const addr = server.address();
+            if (typeof addr === 'object' && addr) {
+                resolve(addr.port);
+            } else {
+                reject(new Error('failed to bind loopback port for bs DAP bridge'));
+            }
+        });
+    });
+
+    // If bs dies before VS Code connects, fail loudly rather than
+    // leaving VS Code hanging on the connect.
+    child.once('exit', () => {
+        try { server.close(); } catch { /* best effort */ }
+    });
+
+    return new DebugAdapterServer(port, '127.0.0.1');
 }
 
 /// Minimal config provider that handles the things a Rust user
@@ -104,27 +200,48 @@ export class BugStalkerConfigProvider implements DebugConfigurationProvider {
         // Same shape as the LLDB path's cargo handling; the helpers
         // are language-agnostic so we reuse them verbatim.
         if (launchConfig.cargo !== undefined) {
-            const cargoTomlFolder = folder ? folder.uri.fsPath : workspace.rootPath;
-            if (!cargoTomlFolder) {
-                await window.showErrorMessage(
-                    'BugStalker cargo integration needs a workspace folder.',
-                    { modal: true },
-                );
-                return null;
+            // Hand off to the EnC pipeline first when it can take
+            // over the build — that path uses the wild linker and
+            // pinned RUSTFLAGS so the launched binary matches what
+            // the watcher will rebuild against. Falls back to the
+            // plain cargo flow below if EnC doesn't fire (no `cargo`
+            // block, EnC explicitly disabled, etc).
+            configureEditContinueCargo(folder, launchConfig);
+            let prebuilt: string | undefined;
+            if (launchConfig._bugstalkerEditContinueAutoConfigured === true) {
+                prebuilt = await prebuildEditContinueBinary(launchConfig);
             }
-            const adapterEnv = workspace
-                .getConfiguration('bugstalker', folder?.uri)
-                .get<{ [k: string]: string }>('adapterEnv', {});
-            const cargo = new Cargo(cargoTomlFolder, adapterEnv);
-            const program = await cargo.getProgramFromCargoConfig(launchConfig.cargo);
-            const cargoDict = { program };
-            delete launchConfig.cargo;
+            if (prebuilt) {
+                launchConfig.program = prebuilt;
+                delete launchConfig.cargo;
+            } else {
+                const cargoTomlFolder = folder ? folder.uri.fsPath : workspace.rootPath;
+                if (!cargoTomlFolder) {
+                    await window.showErrorMessage(
+                        'BugStalker cargo integration needs a workspace folder.',
+                        { modal: true },
+                    );
+                    return null;
+                }
+                const adapterEnv = workspace
+                    .getConfiguration('bugstalker', folder?.uri)
+                    .get<{ [k: string]: string }>('adapterEnv', {});
+                const cargo = new Cargo(cargoTomlFolder, adapterEnv);
+                const program = await cargo.getProgramFromCargoConfig(launchConfig.cargo);
+                const cargoDict = { program };
+                delete launchConfig.cargo;
 
-            launchConfig = expandCargo(launchConfig, cargoDict);
+                launchConfig = expandCargo(launchConfig, cargoDict);
 
-            if (launchConfig.program === undefined) {
-                launchConfig.program = cargoDict.program;
+                if (launchConfig.program === undefined) {
+                    launchConfig.program = cargoDict.program;
+                }
             }
+        } else {
+            // No cargo block — but if `program` points at
+            // rust-analyzer's temp build dir, rebuild in the project
+            // target so launch+watcher artifacts agree.
+            await configureEditContinueForRustAnalyzerTemp(folder, launchConfig);
         }
 
         return launchConfig;

@@ -5,7 +5,7 @@ import {
 import * as cp from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { output } from './logging';
+import { output } from './main';
 
 interface EditContinueOptions {
     session: DebugSession;
