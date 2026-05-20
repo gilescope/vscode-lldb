@@ -8,9 +8,9 @@ name: CI
 
 on:
   push:
-    branches: [master, bt]
+    branches: [main, bt]
   pull_request:
-    branches: [master, bt]
+    branches: [main, bt]
 
 jobs:
   bs-gate:
