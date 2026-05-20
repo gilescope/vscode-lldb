@@ -1,4 +1,6 @@
-/.vscode/
-/build*/
-/target/
-*.pyc
+.vscode/
+build*/
+out/
+target/
+node_modules/
+*.vsix

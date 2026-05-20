@@ -1,52 +1,140 @@
-# Features
-- Conditional breakpoints, function breakpoints, logpoints,
-- Hardware data access breakpoints (watchpoints),
-- Launch debuggee in integrated or external terminal,
-- Disassembly view with instruction-level stepping,
-- [Step Into Targets](https://code.visualstudio.com/updates/v1_46#_step-into-targets).
-- Caller exclusion for breakpoints.
-- Memory view.
-- Loaded modules view,
-- Python scripting,
-- HTML rendering for advanced visualizations,
-- Workspace-level defaults for launch configurations,
-- Remote debugging,
-- Reverse debugging (experimental, requires a compatible backend).
+# BugStalker for VS Code
 
-For full details please see [User's Manual](MANUAL.md).<br>
+VS Code debug adapter integration for
+[BugStalker](https://github.com/gilescope/BugStalker) — a pure-Rust,
+DWARF-native debugger purpose-built for Rust:
 
-# Languages
-The primary focus of this project are the C++ and Rust languages, for which CodeLLDB includes built-in visualizers for
-vectors, strings, maps, and other standard library types.<br>
-That said, it is usable with most other compiled languages whose compiler generates compatible debugging information,
-such as Ada, Fortran, Kotlin Native, Nim, Objective-C, Pascal, [Swift](https://github.com/vadimcn/codelldb/wiki/Swift)
-and Zig.
+- v0 + legacy symbol demangling via an in-tree parser.
+- vtable-driven concrete-type recovery for `Box<dyn Trait>`,
+  `Pin<Box<dyn Future>>`, and friends.
+- Niche-resilient `Option<T>` / `Result<T, E>` decoding (zero-bit /
+  null-pointer / NonZero* / `bool` / `char` / fn-pointer niches).
+- `Rc<T>` / `Arc<T>` cycle detection with depth-bounded rendering.
+- Tokio async await-trace: per-task awaitee chain with recovered
+  source coordinates from `DW_AT_decl_file` / `DW_AT_decl_line`.
 
-# Supported Platforms
+The extension itself is a thin shim: it spawns the BugStalker
+binary in stdio DAP mode (`bs --dap`) and otherwise stays out of
+the way. No LLDB libraries, no Python, no platform-specific
+adapter binaries to download.
 
-## Host
-- Linux with glibc 2.18+ for x86_64, aarch64 or armhf.
-- MacOS 10.12+ for x86_64 and 11.0+ for arm64.
-- Windows 10 and 11 for x86_64. [See Windows notes in wiki!](https://github.com/vadimcn/codelldb/wiki/Windows)
+## Quick start
 
-## Target
-CodeLLDB supports AArch64, ARM, AVR, MSP430, RISCV, X86 architectures and may be used to debug on embedded platforms
-via [remote debugging](MANUAL.md#remote-debugging).
+1. Install the BugStalker binary. The Cargo package is named
+   `bugstalker` but the produced binary is **`bs`**:
 
-# More information
-- [CodeLLDB User's Manual](MANUAL.md) - how to use this extension.
-- [Debugging in VS Code](https://code.visualstudio.com/docs/editor/debugging) - if you are new to VSCode debugging.
-- [LLDB Tutorial](https://lldb.llvm.org/use/tutorial.html) - all of LLDB's CLI commands and scripting features may be used in CodeLLDB.
-- [Wiki pages](https://github.com/vadimcn/codelldb/wiki) - [troubleshooting](https://github.com/vadimcn/codelldb/wiki/Troubleshooting) and other tips and tricks.
-- [Discussions](https://github.com/vadimcn/codelldb/discussions) - for questions and discussions.
+   ```sh
+   cargo install bugstalker        # installs ~/.cargo/bin/bs
+   ```
 
-# Screenshots
+   …or build from source:
 
-C++ debugging with data visualization ([Howto](https://github.com/vadimcn/codelldb/wiki/Data-visualization)):<br>
-![source](images/plotting.png)
-<br>
-<br>
-Rust debugging:<br>
-![source](images/source.png)
+   ```sh
+   git clone https://github.com/gilescope/BugStalker
+   cd BugStalker && cargo install --path .
+   ```
 
+   …or, on macOS, run the project's `+install-darwin` Earthly
+   target which does install + entitlement codesign in one step:
 
+   ```sh
+   cd ~/path/to/BugStalker
+   earthly +install-darwin         # installs ~/.cargo/bin/bs
+                                   # signed with cs.debugger
+                                   # plus a `bugstalker` symlink
+   ```
+
+   The extension's default `bugstalker.executable` setting is `bs`,
+   matching whatever any of these paths produce. Override the
+   setting if your binary lives somewhere else (e.g. an absolute
+   path to a development build).
+
+2. Make sure the binary has the OS permissions it needs for ptrace.
+   `+install-darwin` does this for you on macOS; otherwise:
+
+   - **macOS**: codesign with the `task_for_pid` entitlement —
+     BugStalker's repo carries the entitlements file:
+
+     ```sh
+     codesign -s - --force \
+         --entitlements path/to/BugStalker/tests/darwin.entitlements \
+         "$(which bs)"
+     ```
+
+   - **Linux**: install with `setcap cap_sys_ptrace=ep`, run under
+     `sudo`, or set `kernel.yama.ptrace_scope = 0`.
+
+3. Add a `launch.json` configuration:
+
+   ```jsonc
+   {
+       "version": "0.2.0",
+       "configurations": [
+           {
+               "name": "Debug",
+               "type": "bugstalker",
+               "request": "launch",
+               "cargo": { "args": ["build", "--bin=my_bin"] },
+               "args": [],
+               "cwd": "${workspaceFolder}"
+           }
+       ]
+   }
+   ```
+
+   F5 to start. Cargo runs first, the produced artefact becomes
+   `program`, and BugStalker takes over.
+
+See [`BUGSTALKER.md`](BUGSTALKER.md) for the full quickstart,
+settings, cargo block reference, and what's wired through the DAP
+channel (including the BugStalker-specific `bs/awaitTrace` custom
+request).
+
+## Building the extension
+
+```sh
+npm install
+npm run build              # webpack production bundle into out/extension.js
+# or:
+npm run watch              # development build, rebuild on change
+npm run typecheck          # tsc --noEmit only
+```
+
+`earthly +bs-gate` (or `+all`) runs the same gate the Earthfile-
+based CI uses.
+
+## Cutting a signed release
+
+```sh
+earthly +release           # +all + GPG-detached signature on the .vsix
+```
+
+`+release` runs `+all` (lint + typecheck + webpack + vsix) and
+then `+sign-vsix`, which is a `LOCALLY` target — it runs on the
+host so it can reach your GPG agent / yubikey pinentry. Output:
+
+- `build/vscode-bugstalker.vsix`
+- `build/vscode-bugstalker.vsix.asc` (GPG detached, ASCII-armoured)
+
+Signing key selection, in priority order:
+
+1. `earthly --GPG_KEY=<long-id> +sign-vsix` — explicit override
+2. `git config user.signingkey` — the same key you sign commits
+   with; the typical case
+3. GPG's default identity, otherwise
+
+`+sign-vsix` round-trips the signature through `gpg --verify`
+before exiting, so a bad signing pipeline fails loudly instead of
+silently producing a corrupt `.asc`. With a yubikey backing the
+key, the target will prompt for a touch.
+
+Day-to-day work stays touch-free — `+all` deliberately omits
+signing. Only invoke `+release` (or `+sign-vsix` directly) when
+you actually want a signed artefact.
+
+## License
+
+MIT. Forked from [`vadimcn/vscode-lldb`](https://github.com/vadimcn/vscode-lldb)
+(also MIT) as a starting point; the LLDB-side code (codelldb adapter,
+LLDB shared-library lookups, Python integration) has been removed
+since BugStalker is its own pure-Rust DAP server.
