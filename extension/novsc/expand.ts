@@ -1,29 +1,28 @@
-import { Dict } from "./commonTypes";
-
-// Returning null means "keep the original text".
-type Expander = (type: string | null, key: string) => string | null;
+import { Dict, Environment } from "./commonTypes";
 
 let expandVarRegex = /\$\{(?:([^:}]+):)?([^}]+)\}/g;
 
-export function expandVariables<T extends any>(obj: T, expander: Expander): T {
+export function expandVariables(str: string | String, expander: (type: string, key: string) => string): string {
+    let result = str.replace(expandVarRegex, (all: string, type: string, key: string): string => {
+        let replacement = expander(type, key);
+        return replacement != null ? replacement : all;
+    });
+    return result;
+}
 
-    if (typeof obj == 'string' || obj instanceof String) {
-        return obj.replace(expandVarRegex, (all: string, type: string, key: string): string => {
-            let replacement = expander(type, key);
-            return replacement != null ? replacement : all;
-        }) as T;
-    }
+export function expandVariablesInObject(obj: any, expander: (type: string, key: string) => string): any {
+    if (typeof obj == 'string' || obj instanceof String)
+        return expandVariables(obj, expander);
 
     if (isScalarValue(obj))
         return obj;
 
     if (obj instanceof Array)
-        return obj.map(v => expandVariables(v, expander)) as T;
+        return obj.map(v => expandVariablesInObject(v, expander));
 
-    let result: Dict<any> = {};
-    for (let prop of Object.getOwnPropertyNames(obj))
-        result[prop] = expandVariables((obj as Dict<any>)[prop], expander);
-    return result as T;
+    for (let prop of Object.keys(obj))
+        obj[prop] = expandVariablesInObject(obj[prop], expander)
+    return obj;
 }
 
 function isScalarValue(value: any): boolean {
@@ -33,20 +32,30 @@ function isScalarValue(value: any): boolean {
         typeof value == 'string' || value instanceof String;
 }
 
-// In conflicts, value1 wins.
-export function mergeValues(value1: any, value2: any, reverseSeq: boolean = false): any {
-    if (value1 === undefined) {
+
+export function mergeValues(value1: any, value2: any): any {
+    if (value2 === undefined)
+        return value1;
+    // For non-container types, value2 wins.
+    if (isScalarValue(value1))
         return value2;
-    } else if (value2 === undefined) {
-        return value1;
-    } else if (isScalarValue(value1) || isScalarValue(value2)) {
-        return value1;
-    } else if (value1 instanceof Array && value2 instanceof Array) {
-        if (!reverseSeq)
-            return value1.concat(value2);
-        else
-            return value2.concat(value1)
-    } else {
-        return Object.assign({}, value2, value1);
+    // Concatenate arrays.
+    if (value1 instanceof Array && value2 instanceof Array)
+        return value1.concat(value2);
+    // Merge dictionaries.
+    return Object.assign({}, value1, value2);
+}
+
+// Expand ${env:...} placeholders in extraEnv and merge it with the current process' environment.
+export function mergedEnvironment(extraEnv: Dict<string>): Environment {
+    let env = new Environment();
+    env = Object.assign(env, process.env);
+    for (let key in extraEnv) {
+        env[key] = expandVariables(extraEnv[key], (type, key) => {
+            if (type == 'env')
+                return process.env[key];
+            throw new Error('Unknown variable type ' + type);
+        });
     }
+    return env;
 }
