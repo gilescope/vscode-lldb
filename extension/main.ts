@@ -19,6 +19,7 @@ import {
 } from './novsc/bugstalker';
 import { BugStalkerTrackerFactory } from './novsc/tracker';
 import { registerEditContinue } from './editContinue';
+import { registerPerfOverlay } from './perfOverlay';
 
 const execFileAsync = promisify(execFile);
 
@@ -30,6 +31,7 @@ export function activate(context: ExtensionContext): void {
     void logVersionBanner(context);
 
     registerEditContinue(context);
+    registerPerfOverlay(context);
 
     const adapterFactory: DebugAdapterDescriptorFactory = {
         createDebugAdapterDescriptor: (_session, _executable) => {
