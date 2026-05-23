@@ -50,7 +50,21 @@ interface PerfOverlayResponse {
     unresolvedSamples: number;
 }
 
+// Mode the adapter is collecting under. Drives the tooltip label
+// so users can tell whether the gutter heat-map is supposed to be
+// populated. Unknown values are tolerated and rendered verbatim.
+type PerfMode =
+    | 'linux-cycles'
+    | 'macos-poll'
+    | 'macos-rusage-only'
+    | 'disabled'
+    | string;
+
 interface PerfStoppedSummary {
+    // Server may omit when running against an older BugStalker
+    // build that pre-dates the `mode` field; fall back to deriving
+    // from runCycles / runCpuTimeNs in that case.
+    mode?: PerfMode;
     runCycles: number;
     runWallNs: number;
     // Tier 2 macOS path returns CPU time (ns) instead of raw cycles.
@@ -190,6 +204,7 @@ function updateStatus(summary: PerfStoppedSummary): void {
     active.statusItem.text = parts.join(' · ');
     active.statusItem.tooltip =
         `BugStalker perf — last run:\n` +
+        `  mode:   ${describeMode(summary.mode)}\n` +
         formatCostLine(summary) +
         `  wall:   ${formatDurationNs(summary.runWallNs)}\n` +
         (summary.hot
@@ -198,6 +213,26 @@ function updateStatus(summary: PerfStoppedSummary): void {
         (summary.unresolvedSamples > 0
             ? `  unresolved: ${summary.unresolvedSamples} samples\n`
             : '');
+}
+
+/// Human-readable expansion of the wire `mode` value. Unknown
+/// values pass through verbatim so a newer adapter doesn't get
+/// silently mis-described.
+function describeMode(mode: PerfMode | undefined): string {
+    switch (mode) {
+        case 'linux-cycles':
+            return 'Linux PMU cycles+IP';
+        case 'macos-poll':
+            return 'macOS polling sampler (~5% overhead)';
+        case 'macos-rusage-only':
+            return 'macOS rusage only — no gutter samples (codesign with com.apple.security.cs.debugger for the polling tier)';
+        case 'disabled':
+            return 'disabled';
+        case undefined:
+            return '(legacy adapter, mode unreported)';
+        default:
+            return mode;
+    }
 }
 
 /// Status-bar cost cell. Prefer raw cycles (Linux PMU) when present,
