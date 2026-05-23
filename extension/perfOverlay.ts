@@ -31,10 +31,14 @@ const HEAT_TIERS: ReadonlyArray<{ readonly max: number; readonly colour: string 
     { max: 1.01, colour: '#f7768e' }, // hottest — red-pink
 ];
 
+// Field names mirror the DAP JSON wire format from the BugStalker
+// adapter (src/dap/yadap/session/perf.rs), which is camelCase
+// throughout. Keep these names exact — the previous snake_case
+// shape silently produced undefined reads on every status update.
 interface PerfOverlayLine {
     line: number;          // one-based
-    sample_count: number;
-    sample_share: number;  // 0..1
+    sampleCount: number;
+    sampleShare: number;   // 0..1
     heat: number;          // 0..1
     hottest: boolean;
 }
@@ -42,20 +46,24 @@ interface PerfOverlayLine {
 interface PerfOverlayResponse {
     source: string;
     lines: PerfOverlayLine[];
-    total_resolved_samples: number;
-    unresolved_samples: number;
+    totalResolvedSamples: number;
+    unresolvedSamples: number;
 }
 
 interface PerfStoppedSummary {
-    run_cycles: number;
-    run_wall_ns: number;
+    runCycles: number;
+    runWallNs: number;
+    // Tier 2 macOS path returns CPU time (ns) instead of raw cycles.
+    // Linux cycles+IP leaves this null. Render as a fallback when
+    // runCycles is zero.
+    runCpuTimeNs: number | null;
     hot?: {
         source: string;
         line: number;
-        sample_count: number;
-        sample_share: number;
+        sampleCount: number;
+        sampleShare: number;
     };
-    unresolved_samples: number;
+    unresolvedSamples: number;
 }
 
 interface SessionState {
@@ -169,28 +177,50 @@ function makeTracker(session: DebugSession): DebugAdapterTracker {
 
 function updateStatus(summary: PerfStoppedSummary): void {
     if (!active) return;
-    const parts: string[] = [];
-    parts.push(`perf ${formatCycles(summary.run_cycles)}`);
-    parts.push(formatDurationNs(summary.run_wall_ns));
+    const parts: string[] = [`perf ${formatCost(summary)}`];
+    parts.push(formatDurationNs(summary.runWallNs));
     if (summary.hot) {
         const file = shortPath(summary.hot.source);
-        const sharePct = (summary.hot.sample_share * 100).toFixed(0);
+        const sharePct = (summary.hot.sampleShare * 100).toFixed(0);
         parts.push(`hot ${file}:${summary.hot.line} (${sharePct}%)`);
     }
-    if (summary.unresolved_samples > 0) {
-        parts.push(`unresolved ${summary.unresolved_samples}`);
+    if (summary.unresolvedSamples > 0) {
+        parts.push(`unresolved ${summary.unresolvedSamples}`);
     }
     active.statusItem.text = parts.join(' · ');
     active.statusItem.tooltip =
         `BugStalker perf — last run:\n` +
-        `  cycles: ${summary.run_cycles.toLocaleString()}\n` +
-        `  wall:   ${formatDurationNs(summary.run_wall_ns)}\n` +
+        formatCostLine(summary) +
+        `  wall:   ${formatDurationNs(summary.runWallNs)}\n` +
         (summary.hot
-            ? `  hot:    ${summary.hot.source}:${summary.hot.line} (${summary.hot.sample_count} samples)\n`
+            ? `  hot:    ${summary.hot.source}:${summary.hot.line} (${summary.hot.sampleCount} samples)\n`
             : '') +
-        (summary.unresolved_samples > 0
-            ? `  unresolved: ${summary.unresolved_samples} samples\n`
+        (summary.unresolvedSamples > 0
+            ? `  unresolved: ${summary.unresolvedSamples} samples\n`
             : '');
+}
+
+/// Status-bar cost cell. Prefer raw cycles (Linux PMU) when present,
+/// otherwise the macOS Tier 2 CPU-time fallback, otherwise a dash so
+/// the column is never blank.
+function formatCost(summary: PerfStoppedSummary): string {
+    if (summary.runCycles > 0) return formatCycles(summary.runCycles);
+    if (summary.runCpuTimeNs && summary.runCpuTimeNs > 0) {
+        return `${formatDurationNs(summary.runCpuTimeNs)} cpu`;
+    }
+    return '-';
+}
+
+/// Tooltip cost line. Spells out the unit so a 1.4 ms CPU-time
+/// reading isn't mistaken for a 1.4 ms wall-clock reading.
+function formatCostLine(summary: PerfStoppedSummary): string {
+    if (summary.runCycles > 0) {
+        return `  cycles: ${summary.runCycles.toLocaleString()}\n`;
+    }
+    if (summary.runCpuTimeNs && summary.runCpuTimeNs > 0) {
+        return `  cpu:    ${formatDurationNs(summary.runCpuTimeNs)} (user + system, rusage)\n`;
+    }
+    return `  cycles: <unavailable>\n`;
 }
 
 async function refreshVisible(gen: number): Promise<void> {
@@ -244,13 +274,13 @@ function paint(editor: TextEditor, lines: PerfOverlayLine[]): void {
         const tier = pickTier(line.heat);
         const zeroBased = Math.max(0, line.line - 1);
         const range = new Range(zeroBased, 0, zeroBased, 0);
-        const sharePct = (line.sample_share * 100).toFixed(1);
+        const sharePct = (line.sampleShare * 100).toFixed(1);
         const hot = line.hottest ? ' [hottest]' : '';
         buckets[tier].push({
             range,
             hoverMessage:
                 `**BugStalker perf**${hot}\n\n` +
-                `- samples: ${line.sample_count}\n` +
+                `- samples: ${line.sampleCount}\n` +
                 `- share:   ${sharePct}%\n` +
                 `- heat:    ${(line.heat * 100).toFixed(0)}%`,
         });
