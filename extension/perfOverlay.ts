@@ -60,6 +60,13 @@ type PerfMode =
     | 'disabled'
     | string;
 
+interface PerfDiagnosis {
+    emoji: string;
+    label: string;
+    summary: string;
+    hint: string;
+}
+
 interface PerfStoppedSummary {
     // Server may omit when running against an older BugStalker
     // build that pre-dates the `mode` field; fall back to deriving
@@ -71,6 +78,16 @@ interface PerfStoppedSummary {
     // Linux cycles+IP leaves this null. Render as a fallback when
     // runCycles is zero.
     runCpuTimeNs: number | null;
+    // Retired instructions during the window. macOS populates this
+    // from rusage_info_v4.ri_instructions on macOS 13+. Linux will
+    // populate from PERF_COUNT_HW_INSTRUCTIONS once that lands.
+    runInstructions?: number | null;
+    // Instructions ÷ cycles. Server-computed when both counters are
+    // present; omitted otherwise.
+    ipc?: number | null;
+    // Emoji-coded root-cause hint in the rustc-helpful-error tradition.
+    // Null on stops too short to diagnose.
+    diagnosis?: PerfDiagnosis | null;
     hot?: {
         source: string;
         line: number;
@@ -191,7 +208,20 @@ function makeTracker(session: DebugSession): DebugAdapterTracker {
 
 function updateStatus(summary: PerfStoppedSummary): void {
     if (!active) return;
-    const parts: string[] = [`perf ${formatCost(summary)}`];
+    const parts: string[] = [];
+    if (summary.diagnosis) {
+        // Emoji leads the status — it's the cheapest signal of
+        // "is this run interesting", visible without expanding the
+        // tooltip.
+        parts.push(summary.diagnosis.emoji);
+    }
+    parts.push(`perf ${formatCost(summary)}`);
+    if (summary.runInstructions && summary.runInstructions > 0) {
+        parts.push(`${formatScaled(summary.runInstructions, 'inst')}`);
+    }
+    if (summary.ipc && summary.ipc > 0) {
+        parts.push(`IPC ${summary.ipc.toFixed(2)}`);
+    }
     parts.push(formatDurationNs(summary.runWallNs));
     if (summary.hot) {
         const file = shortPath(summary.hot.source);
@@ -204,14 +234,24 @@ function updateStatus(summary: PerfStoppedSummary): void {
     active.statusItem.text = parts.join(' · ');
     active.statusItem.tooltip =
         `BugStalker perf — last run:\n` +
-        `  mode:   ${describeMode(summary.mode)}\n` +
+        `  mode:    ${describeMode(summary.mode)}\n` +
         formatCostLine(summary) +
-        `  wall:   ${formatDurationNs(summary.runWallNs)}\n` +
+        (summary.runInstructions && summary.runInstructions > 0
+            ? `  inst:    ${summary.runInstructions.toLocaleString()} retired\n`
+            : '') +
+        (summary.ipc && summary.ipc > 0
+            ? `  IPC:     ${summary.ipc.toFixed(3)} (instructions / cycles)\n`
+            : '') +
+        `  wall:    ${formatDurationNs(summary.runWallNs)}\n` +
         (summary.hot
-            ? `  hot:    ${summary.hot.source}:${summary.hot.line} (${summary.hot.sampleCount} samples)\n`
+            ? `  hot:     ${summary.hot.source}:${summary.hot.line} (${summary.hot.sampleCount} samples)\n`
             : '') +
         (summary.unresolvedSamples > 0
             ? `  unresolved: ${summary.unresolvedSamples} samples\n`
+            : '') +
+        (summary.diagnosis
+            ? `\n${summary.diagnosis.emoji} ${summary.diagnosis.label}: ${summary.diagnosis.summary}\n` +
+              `   ↳ ${summary.diagnosis.hint}\n`
             : '');
 }
 
