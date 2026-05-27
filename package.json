@@ -217,6 +217,11 @@
                                 "type": "boolean",
                                 "default": true
                             },
+                            "perfOverlay": {
+                                "description": "Paint BugStalker per-line sample counts in the editor gutter at every stop. Linux-only collection; on other hosts the overlay stays empty. Set false to opt out.",
+                                "type": "boolean",
+                                "default": true
+                            },
                             "editContinueCommand": {
                                 "description": "Command to rebuild and emit a BugStalker wild patch.",
                                 "type": "string"
