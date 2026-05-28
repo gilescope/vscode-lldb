@@ -46,6 +46,7 @@ import {
     configureEditContinueForRustAnalyzerTemp,
     prebuildEditContinueBinary,
 } from '../editContinue';
+import { createVariablesEnhancer } from './varEnhancer';
 
 async function resolveAbsoluteExe(bin: string): Promise<string | undefined> {
     if (path.isAbsolute(bin)) return bin;
@@ -140,7 +141,17 @@ export async function getBugStalkerAdapterExecutable(
             socket.destroy();
             return;
         }
-        child.stdout.pipe(socket);
+        // Variables-view §1: insert a DAP-aware transform on the
+        // adapter→client direction so we can decorate Variable and
+        // StackFrame entries with the storage / mutability / heap /
+        // byte-size / recursion glyphs the bugstalker side emits as
+        // custom fields. VS Code → adapter direction stays direct —
+        // we don't mutate any requests.
+        const enhancer = createVariablesEnhancer(output);
+        enhancer.on('error', err => {
+            output.appendLine(`[bs] var-enhancer error: ${err.message}`);
+        });
+        child.stdout.pipe(enhancer).pipe(socket);
         socket.pipe(child.stdin);
 
         const teardown = () => {
