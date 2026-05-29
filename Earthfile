@@ -182,7 +182,13 @@ sign-vsix:
 install:
     LOCALLY
     ARG EDITOR=code
-    BUILD +vsix
+    # Materialise the .vsix into the local dir BEFORE the install RUN.
+    # A bare `BUILD +vsix` won't do: `SAVE ARTIFACT ... AS LOCAL` is
+    # only flushed to the host during the end-of-build output phase —
+    # *after* this LOCALLY RUN has already executed — so the RUN would
+    # see no file and fail with ENOENT. `COPY` from the artifact
+    # resolves it synchronously into ./build/ first.
+    COPY +vsix/vscode-bugstalker.vsix ./build/vscode-bugstalker.vsix
     # Uninstall any prior `vadimcn.vscode-lldb` (real CodeLLDB or a
     # previous BugStalker build) before installing. VS Code keeps
     # every installed version on disk and activates the highest
