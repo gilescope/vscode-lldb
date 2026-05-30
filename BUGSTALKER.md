@@ -121,7 +121,7 @@ to the variable's **type** tooltip); the full legend is also printed to
 the **BugStalker output channel** on session start:
 
 - 🟩 register — fastest (in a CPU register)
-- 🟨 stack — fast (cache-hot stack slot)
+- 🟢 stack — also fast (cache-hot stack slot)
 - 🟧 static — medium (fixed-address load; 🔒︎ marks read-only)
 - 🟥 thread-local — slowest class (thread-pointer resolution + load)
 - ↗ points into the heap — slowest to reach

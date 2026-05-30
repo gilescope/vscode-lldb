@@ -54,8 +54,11 @@ import { DapMessage, DapMessageTransform } from './dapTransform';
  * bugstalker side and with `STORAGE_MEANING` below.
  */
 const STORAGE_GLYPH: Record<string, string> = {
-    register: '🟩', // green — fastest (in a CPU register)
-    stack: '🟨', // yellow — fast (cache-hot stack slot)
+    register: '🟩', // green square — fastest (in a CPU register)
+    stack: '🟢', // green circle — also fast (cache-hot stack slot).
+    //              Emoji has no "dark green" square, so the green
+    //              circle distinguishes stack from the register square
+    //              while keeping it in the green (= fast) tier.
     static_ro: '🟧', // orange — medium (fixed-address load)
     static_rw: '🟧', // orange — medium
     tls: '🟥', // red — slowest class (thread-local resolution + load)
