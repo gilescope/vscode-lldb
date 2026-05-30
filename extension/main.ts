@@ -18,6 +18,7 @@ import {
     getBugStalkerAdapterExecutable,
 } from './novsc/bugstalker';
 import { BugStalkerTrackerFactory } from './novsc/tracker';
+import { glyphLegendLines } from './novsc/varEnhancer';
 import { registerEditContinue } from './editContinue';
 import { registerPerfOverlay } from './perfOverlay';
 
@@ -95,6 +96,12 @@ async function logVersionBanner(context: ExtensionContext): Promise<void> {
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         output.appendLine(`bs --version: failed — ${msg}`);
+    }
+
+    // The stock variables pane has no per-row tooltip, so print the
+    // decoration-glyph legend here once per session.
+    for (const line of glyphLegendLines()) {
+        output.appendLine(line);
     }
 }
 

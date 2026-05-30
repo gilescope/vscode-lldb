@@ -21,8 +21,17 @@
 //
 // VS Code's stock pane has no way to apply arbitrary CSS to
 // rows. What it WILL render faithfully is the `value` / `name`
-// strings the adapter sent. So we mutate those strings before
-// they reach the client.
+// strings the adapter sent. So we fold the glyphs into the `name`
+// string before it reaches the client.
+//
+// IMPORTANT: decorations go into `name`, never `value`. The `value`
+// field is what "Copy Value" copies and what VS Code feeds to the
+// `evaluate` request (clipboard context) — putting a glyph there
+// produces a corrupt clipboard and an "evaluate parse error: found
+// '👻'" from the adapter. `name` is display-only here (the adapter
+// sets no `evaluateName`, so the stock pane doesn't round-trip the
+// name through `evaluate`). Keep `value` byte-for-byte as the adapter
+// rendered it.
 //
 // Stack health and the threads-pane budget bar would ideally
 // render as their own UI element; for v0 we route the
@@ -66,6 +75,37 @@ const MUTABILITY_BADGE: Record<string, string> = {
 };
 
 /**
+ * Plain-language meaning of each decoration glyph. The stock VS Code
+ * variables pane has no per-row tooltip, so we print this legend to the
+ * BugStalker output channel on session start (see `main.ts`) — the only
+ * discoverability channel available until the custom TreeView lands
+ * (variables-view.md §7). Keep in lockstep with `STORAGE_GLYPH`,
+ * `HEAP_OVERLAY`, and `MUTABILITY_BADGE` above.
+ */
+const GLYPH_LEGEND: ReadonlyArray<readonly [string, string]> = [
+    [STORAGE_GLYPH.stack, 'stack local'],
+    [STORAGE_GLYPH.register, 'in a register'],
+    [STORAGE_GLYPH.static_ro, 'static, read-only (.rodata)'],
+    [STORAGE_GLYPH.static_rw, 'static, mutable (.data/.bss)'],
+    [STORAGE_GLYPH.tls, 'thread-local'],
+    [STORAGE_GLYPH.optimized, 'optimized away — value unavailable'],
+    [HEAP_OVERLAY, 'points into the heap'],
+    [MUTABILITY_BADGE.ro, 'read-only / immutable binding'],
+];
+
+/**
+ * Lines describing the variable-decoration glyphs, for the session-start
+ * banner. The glyphs are folded into each variable's *name*; this legend
+ * is what tells the reader what they mean.
+ */
+export function glyphLegendLines(): string[] {
+    return [
+        'variable glyphs (shown on the name; value is left untouched):',
+        ...GLYPH_LEGEND.map(([glyph, meaning]) => `  ${glyph}  ${meaning}`),
+    ];
+}
+
+/**
  * Construct the transform stream that enhances DAP responses
  * with the variables-view §1 vocabulary. `output` receives the
  * stack-health pill on each stack-trace response.
@@ -102,7 +142,9 @@ function mutateVariablesResponse(msg: DapMessage): DapMessage {
 }
 
 function decorateVariable(v: any): void {
-    if (typeof v?.value !== 'string') return;
+    // Decorate the NAME, not the value (see file header). Bail if the
+    // adapter sent no usable name to fold glyphs into.
+    if (typeof v?.name !== 'string') return;
 
     const storage = typeof v['bugstalker.storage'] === 'string'
         ? STORAGE_GLYPH[v['bugstalker.storage'] as string] ?? ''
@@ -113,18 +155,16 @@ function decorateVariable(v: any): void {
         : '';
 
     // Compose the prefix: <storage><heap-overlay><mutability> +
-    // single space + original value. Empty fragments are skipped
+    // single space + original name. Empty fragments are skipped
     // so we don't get awkward leading spaces.
     const prefix = [storage + heap, mutability]
         .filter(s => s.length > 0)
         .join(' ');
     if (prefix.length > 0) {
-        v.value = `${prefix}  ${v.value}`;
+        v.name = `${prefix}  ${v.name}`;
     }
 
-    // Trailing: byte_size + layout-waste tag. Faded by prefixing
-    // a NO-BREAK SPACE so VS Code doesn't collapse adjacent
-    // whitespace in some themes.
+    // Trailing: byte_size + layout-waste tag, appended to the name.
     const trailers: string[] = [];
     const byteSize = typeof v['bugstalker.byte_size'] === 'number'
         ? formatBytes(v['bugstalker.byte_size'] as number)
@@ -151,7 +191,7 @@ function decorateVariable(v: any): void {
         }
     }
     if (trailers.length > 0) {
-        v.value = `${v.value}  ${trailers.join(' ')}`;
+        v.name = `${v.name}  ${trailers.join(' ')}`;
     }
 }
 
