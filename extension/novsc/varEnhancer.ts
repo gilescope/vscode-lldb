@@ -44,22 +44,45 @@ import { OutputChannel } from 'vscode';
 import { DapMessage, DapMessageTransform } from './dapTransform';
 
 /**
- * Storage-class glyph vocabulary (variables-view §1.3). Maps
- * the bugstalker.storage string to its leading-glyph form.
- * Stays in lockstep with `StorageClass::as_dap_str` on the
- * bugstalker side.
+ * Storage-class glyph vocabulary (variables-view §1.3), coloured by how
+ * fast that data is to read: green = fastest, red = slowest. A register
+ * lives in the CPU (instant); a stack slot is almost always cache-hot; a
+ * static is a fixed-address memory load; TLS adds thread-pointer
+ * resolution before the load. Mutability (ro vs rw) is a separate axis
+ * carried by `MUTABILITY_BADGE`, so `static_ro`/`static_rw` share a
+ * colour. Stays in lockstep with `StorageClass::as_dap_str` on the
+ * bugstalker side and with `STORAGE_MEANING` below.
  */
 const STORAGE_GLYPH: Record<string, string> = {
-    stack: '⬛', // ⬛
-    register: '🟦', // 🟦
-    static_ro: '⬜', // ⬜
-    static_rw: '🟧', // 🟧
-    tls: '🟣', // 🟣 (large purple circle — closest to the design's purple square)
-    optimized: '👻', // 👻
+    register: '🟩', // green — fastest (in a CPU register)
+    stack: '🟨', // yellow — fast (cache-hot stack slot)
+    static_ro: '🟧', // orange — medium (fixed-address load)
+    static_rw: '🟧', // orange — medium
+    tls: '🟥', // red — slowest class (thread-local resolution + load)
+    optimized: '👻', // off-scale — optimized away, nothing to fetch
     unknown: '',
 };
 
+/**
+ * Plain-language meaning for each storage class, appended to the DAP
+ * `type` field (which VS Code surfaces as the row's hover tooltip — the
+ * one place a per-variable explanation fits). Speed wording matches the
+ * colour ramp in `STORAGE_GLYPH`.
+ */
+const STORAGE_MEANING: Record<string, string> = {
+    register: 'register — fastest to read',
+    stack: 'stack — fast',
+    static_ro: 'static, read-only — medium',
+    static_rw: 'static, mutable — medium',
+    tls: 'thread-local — slowest class',
+    optimized: 'optimized away — no value to read',
+};
+
+// Heap is the slowest data of all: load the pointer, then chase it to
+// (usually cache-cold) heap memory. Rendered as an overlay on whatever
+// storage holds the pointer.
 const HEAP_OVERLAY = '↗'; // ↗
+const HEAP_MEANING = 'points into the heap — slowest to reach';
 
 /**
  * Mutability indicator (variables-view §1.2). VS Code stock pane
@@ -75,28 +98,24 @@ const MUTABILITY_BADGE: Record<string, string> = {
 };
 
 /**
- * Plain-language meaning of each decoration glyph. The stock VS Code
- * variables pane has no per-row tooltip, so we print this legend to the
- * BugStalker output channel on session start (see `main.ts`) — the only
- * discoverability channel available until the custom TreeView lands
- * (variables-view.md §7). Keep in lockstep with `STORAGE_GLYPH`,
- * `HEAP_OVERLAY`, and `MUTABILITY_BADGE` above.
+ * Glyph legend for the session-start banner — a global, speed-ordered
+ * reference (each row's `type` tooltip explains its own glyphs too).
+ * Ordered fastest → slowest to read, matching the green→red ramp. Keep
+ * in lockstep with `STORAGE_GLYPH` / `STORAGE_MEANING` above.
  */
 const GLYPH_LEGEND: ReadonlyArray<readonly [string, string]> = [
-    [STORAGE_GLYPH.stack, 'stack local'],
-    [STORAGE_GLYPH.register, 'in a register'],
-    [STORAGE_GLYPH.static_ro, 'static, read-only (.rodata)'],
-    [STORAGE_GLYPH.static_rw, 'static, mutable (.data/.bss)'],
-    [STORAGE_GLYPH.tls, 'thread-local'],
-    [STORAGE_GLYPH.optimized, 'optimized away — value unavailable'],
-    [HEAP_OVERLAY, 'points into the heap'],
-    [MUTABILITY_BADGE.ro, 'read-only / immutable binding'],
+    [STORAGE_GLYPH.register, STORAGE_MEANING.register],
+    [STORAGE_GLYPH.stack, STORAGE_MEANING.stack],
+    [STORAGE_GLYPH.static_ro, `static — medium (${MUTABILITY_BADGE.ro} = read-only)`],
+    [STORAGE_GLYPH.tls, STORAGE_MEANING.tls],
+    [HEAP_OVERLAY, HEAP_MEANING],
+    [STORAGE_GLYPH.optimized, STORAGE_MEANING.optimized],
 ];
 
 /**
  * Lines describing the variable-decoration glyphs, for the session-start
  * banner. The glyphs are folded into each variable's *name*; this legend
- * is what tells the reader what they mean.
+ * (and each row's `type` tooltip) is what tells the reader what they mean.
  */
 export function glyphLegendLines(): string[] {
     return [
@@ -162,6 +181,27 @@ function decorateVariable(v: any): void {
         .join(' ');
     if (prefix.length > 0) {
         v.name = `${prefix}  ${v.name}`;
+    }
+
+    // Hover tooltip: VS Code surfaces the DAP `type` as the row's
+    // tooltip, so append the glyph meanings there — the one place a
+    // per-variable explanation of 🟩/🟥/👻/↗ fits, and `type` is never
+    // copied or evaluated (unlike `value`).
+    if (typeof v.type === 'string') {
+        const notes: string[] = [];
+        const storageKey = v['bugstalker.storage'];
+        if (typeof storageKey === 'string' && STORAGE_MEANING[storageKey]) {
+            const glyph = STORAGE_GLYPH[storageKey] ?? '';
+            notes.push(`${glyph} ${STORAGE_MEANING[storageKey]}`.trim());
+        }
+        if (heap) {
+            notes.push(`${HEAP_OVERLAY} ${HEAP_MEANING}`);
+        }
+        if (notes.length > 0) {
+            v.type = v.type.length > 0
+                ? `${v.type}  ·  ${notes.join('  ·  ')}`
+                : notes.join('  ·  ');
+        }
     }
 
     // Trailing: byte_size + layout-waste tag, appended to the name.

@@ -113,20 +113,19 @@ Attaching to a running process:
 
 ## Variable glyphs
 
-Each variable's **name** carries a leading glyph for its storage class
-(and trailing byte-size). The glyphs are folded into the name — never
-the value — so "Copy Value" stays clean. The legend is also printed to
-the **BugStalker output channel** on session start (the stock pane has
-no per-row tooltip):
+Each variable's **name** carries a leading glyph for its storage class,
+coloured by how fast that data is to read — green = fastest, red =
+slowest. The glyphs are folded into the name — never the value — so
+"Copy Value" stays clean. Hover a row to see the meaning (it's appended
+to the variable's **type** tooltip); the full legend is also printed to
+the **BugStalker output channel** on session start:
 
-- ⬛ stack local
-- 🟦 in a register
-- ⬜ static, read-only (`.rodata`)
-- 🟧 static, mutable (`.data`/`.bss`)
-- 🟣 thread-local
-- 👻 optimized away — value unavailable
-- ↗ points into the heap
-- 🔒︎ read-only / immutable binding
+- 🟩 register — fastest (in a CPU register)
+- 🟨 stack — fast (cache-hot stack slot)
+- 🟧 static — medium (fixed-address load; 🔒︎ marks read-only)
+- 🟥 thread-local — slowest class (thread-pointer resolution + load)
+- ↗ points into the heap — slowest to reach
+- 👻 optimized away — no value to read
 
 ## Cargo build integration
 
