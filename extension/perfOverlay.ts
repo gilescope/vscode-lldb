@@ -327,7 +327,10 @@ async function refreshEditor(editor: TextEditor, gen: number): Promise<void> {
     try {
         response = await active.session.customRequest('bs/perfOverlay', {
             source: fsPath,
-            window: 'LastRun',
+            // Adapter expects camelCase 'lastRun' | 'cumulative'
+            // (perf.rs parse_perf_overlay_window). PascalCase here was
+            // rejected on every stop, leaving the gutter permanently empty.
+            window: 'lastRun',
         }) as PerfOverlayResponse;
     } catch (err) {
         // perfOverlay is a best-effort surface. If the adapter doesn't
