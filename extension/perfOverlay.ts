@@ -164,9 +164,22 @@ async function onSessionStart(session: DebugSession): Promise<void> {
     };
 
     try {
-        await session.customRequest('bs/perfOverlayEnable', {});
-        active.enabled = true;
-        output.appendLine('[perf] overlay enabled');
+        // bs answers with { enabled, unavailable?, intelPt?, kperf? }. A
+        // successful *request* doesn't mean collection is live: a bs built
+        // without `--features perf` (or a platform/permission shortfall)
+        // replies enabled:false with a reason in `unavailable`. Surface that
+        // — otherwise the status bar sits at the initial 'perf: -' with no clue.
+        const resp = (await session.customRequest('bs/perfOverlayEnable', {})) as
+            | { enabled?: boolean; unavailable?: string | null }
+            | undefined;
+        if (resp?.enabled) {
+            active.enabled = true;
+            output.appendLine('[perf] overlay enabled');
+        } else {
+            const why = resp?.unavailable ?? 'adapter reported perf overlay unavailable (no reason given)';
+            output.appendLine(`[perf] overlay unavailable — ${why}`);
+            active.statusItem.tooltip = `BugStalker performance overlay unavailable — ${why}`;
+        }
     } catch (err) {
         output.appendLine(`[perf] enable failed: ${formatErr(err)}`);
         // Keep the state object around — without enable we still pick
