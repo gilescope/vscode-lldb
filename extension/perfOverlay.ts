@@ -468,11 +468,7 @@ async function attributeStep(
     const inst = summary?.runInstructions ?? 0;
     if (reason === 'step' && prev && inst > 0) {
         recordStepCost(prev.fsPath, prev.line, inst);
-        const tracked = active.stepCosts.get(prev.fsPath)?.size ?? 0;
-        output.appendLine(`[perf] step ${shortPath(prev.fsPath)}:${prev.line} +${inst} inst (${tracked} lines tracked)`);
         repaintStepCosts(prev.fsPath);
-    } else if (reason === 'step') {
-        output.appendLine(`[perf] step not attributed (prev=${prev ? `${shortPath(prev.fsPath)}:${prev.line}` : 'none'}, inst=${inst}, here=${here ? 'ok' : 'no-frame'})`);
     }
     active.prevStop = here;
 }
@@ -511,9 +507,12 @@ function repaintStepCosts(fsPath: string): void {
             const tier = pickTier(heat);
             const zb = Math.min(Math.max(0, line - 1), editor.document.lineCount - 1);
             buckets[tier].push({
-                // Hover only fires over decorated *text*, not the gutter
-                // icon — so anchor it to the whole line's text range.
-                range: editor.document.lineAt(zb).range,
+                // Zero-width point at col 0: renders the gutter icon for
+                // this line WITHOUT overlapping the code text, so it can't
+                // interfere with the debug/rust-analyzer hover. (A gutter
+                // icon isn't hoverable anyway — exact numbers live in the
+                // Step Costs sidebar.)
+                range: new Range(zb, 0, zb, 0),
                 hoverMessage:
                     `**BugStalker step cost** — ${TIER_NAMES[tier]} ` +
                     `(${(heat * 100).toFixed(0)}% of this file's hottest stepped line)\n\n` +
@@ -548,9 +547,9 @@ function paint(editor: TextEditor, lines: PerfOverlayLine[]): void {
     for (const line of lines) {
         const tier = pickTier(line.heat);
         const zeroBased = Math.min(Math.max(0, line.line - 1), editor.document.lineCount - 1);
-        // Whole-line text range so the hover actually fires (a gutter
-        // icon alone isn't hoverable; a zero-width range has no target).
-        const range = editor.document.lineAt(zeroBased).range;
+        // Zero-width point at col 0 — gutter icon only, no overlap with
+        // code text (see repaintStepCosts), so debug/RA hovers are untouched.
+        const range = new Range(zeroBased, 0, zeroBased, 0);
         const sharePct = (line.sampleShare * 100).toFixed(1);
         const hot = line.hottest ? ' [hottest]' : '';
         buckets[tier].push({
