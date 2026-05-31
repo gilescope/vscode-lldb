@@ -112,6 +112,12 @@
             },
             {
                 "category": "BugStalker",
+                "command": "bugstalker.clearStepCosts",
+                "title": "Clear Step Costs",
+                "icon": "$(clear-all)"
+            },
+            {
+                "category": "BugStalker",
                 "command": "lldb.stepIntoSkipLibs",
                 "title": "Step Into (Skip Libraries)"
             },
@@ -173,6 +179,24 @@
                 "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
             }
         ],
+        "views": {
+            "debug": [
+                {
+                    "id": "bugstalker.stepCosts",
+                    "name": "Step Costs",
+                    "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+                }
+            ]
+        },
+        "menus": {
+            "view/title": [
+                {
+                    "command": "bugstalker.clearStepCosts",
+                    "when": "view == bugstalker.stepCosts",
+                    "group": "navigation"
+                }
+            ]
+        },
         "configuration": {
             "type": "object",
             "title": "BugStalker",

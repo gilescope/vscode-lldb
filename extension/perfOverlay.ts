@@ -13,9 +13,10 @@
 import {
     commands, debug, window, Uri,
     DecorationOptions, DebugAdapterTracker, DebugAdapterTrackerFactory,
-    DebugSession, ExtensionContext,
+    DebugSession, Event, EventEmitter, ExtensionContext,
     OverviewRulerLane, Range, StatusBarAlignment, StatusBarItem,
     TextEditor, TextEditorDecorationType,
+    ThemeColor, ThemeIcon, TreeDataProvider, TreeItem, TreeItemCollapsibleState,
 } from 'vscode';
 import { output } from './main';
 
@@ -149,6 +150,10 @@ export function registerPerfOverlay(ctx: ExtensionContext): void {
 
     ctx.subscriptions.push(commands.registerCommand('bugstalker.togglePerfStepCosts', togglePerfStepCosts));
 
+    stepCostsProvider = new StepCostsProvider();
+    ctx.subscriptions.push(window.registerTreeDataProvider('bugstalker.stepCosts', stepCostsProvider));
+    ctx.subscriptions.push(commands.registerCommand('bugstalker.clearStepCosts', clearStepCosts));
+
     ctx.subscriptions.push(debug.onDidStartDebugSession(onSessionStart));
     ctx.subscriptions.push(debug.onDidTerminateDebugSession(onSessionEnd));
     ctx.subscriptions.push(window.onDidChangeActiveTextEditor(() => {
@@ -206,6 +211,7 @@ function bindTo(session: DebugSession): void {
     };
     const name = (session.configuration as { name?: string })?.name ?? session.id;
     output.appendLine(`[perf] overlay → session "${name}" (${session.type})`);
+    stepCostsProvider?.refresh(); // fresh (empty) costs for the new session
     void enableOverlay(session);
 }
 
@@ -256,6 +262,7 @@ function teardown(): void {
     }
     active.statusItem.dispose();
     active = undefined;
+    stepCostsProvider?.refresh(); // empties the sidebar
 }
 
 function makeTracker(session: DebugSession): DebugAdapterTracker {
@@ -469,6 +476,7 @@ async function attributeStep(
     if (reason === 'step' && prev && inst > 0) {
         recordStepCost(prev.fsPath, prev.line, inst);
         repaintStepCosts(prev.fsPath);
+        stepCostsProvider?.refresh();
     }
     active.prevStop = here;
 }
@@ -538,7 +546,70 @@ function togglePerfStepCosts(): void {
     for (const editor of window.visibleTextEditors) {
         repaintStepCosts(editor.document.uri.fsPath);
     }
+    stepCostsProvider?.refresh();
     output.appendLine(`[perf] per-step cost annotations ${active.stepCostsEnabled ? 'on' : 'off'}`);
+}
+
+function clearStepCosts(): void {
+    if (!active) return;
+    active.stepCosts.clear();
+    for (const editor of window.visibleTextEditors) {
+        repaintStepCosts(editor.document.uri.fsPath);
+    }
+    stepCostsProvider?.refresh();
+    output.appendLine('[perf] step costs cleared');
+}
+
+// --- Step Costs sidebar (TreeView) -----------------------------------
+// Ranked, exact, click-to-jump — the home for the numbers the gutter
+// bars only hint at (a gutter icon can't be hovered, and inline text
+// clutters the code). Reads live from `active.stepCosts`.
+interface StepCostNode { fsPath: string; line: number; cost: StepCost; tier: number }
+
+// Index-aligned with HEAT_TIERS — built-in chart ThemeColors so the dot
+// matches the gutter blue→red without shipping custom colours.
+const TIER_CHART_COLORS: readonly string[] = ['charts.blue', 'charts.yellow', 'charts.orange', 'charts.red'];
+
+let stepCostsProvider: StepCostsProvider | undefined;
+
+class StepCostsProvider implements TreeDataProvider<StepCostNode> {
+    private readonly emitter = new EventEmitter<void>();
+    readonly onDidChangeTreeData: Event<void> = this.emitter.event;
+
+    refresh(): void {
+        this.emitter.fire();
+    }
+
+    getChildren(): StepCostNode[] {
+        if (!active || !active.stepCostsEnabled) return [];
+        const rows: Array<{ fsPath: string; line: number; cost: StepCost }> = [];
+        let max = 0;
+        for (const [fsPath, byLine] of active.stepCosts) {
+            for (const [line, cost] of byLine) {
+                rows.push({ fsPath, line, cost });
+                if (cost.inst > max) max = cost.inst;
+            }
+        }
+        rows.sort((a, b) => b.cost.inst - a.cost.inst);
+        return rows.map((r) => ({ ...r, tier: pickTier(max > 0 ? r.cost.inst / max : 0) }));
+    }
+
+    getTreeItem(node: StepCostNode): TreeItem {
+        const item = new TreeItem(`${shortPath(node.fsPath)}:${node.line}`, TreeItemCollapsibleState.None);
+        const hits = node.cost.hits > 1 ? ` ×${node.cost.hits}` : '';
+        item.description = `${formatScaled(node.cost.inst, 'inst')}${hits}`;
+        item.tooltip =
+            `${node.fsPath}:${node.line}\n` +
+            `${node.cost.inst.toLocaleString()} instructions over ${node.cost.hits} step(s)` +
+            (node.cost.hits > 1 ? `\navg ${Math.round(node.cost.inst / node.cost.hits).toLocaleString()}/step` : '');
+        item.iconPath = new ThemeIcon('circle-filled', new ThemeColor(TIER_CHART_COLORS[node.tier]));
+        item.command = {
+            command: 'vscode.open',
+            title: 'Open',
+            arguments: [Uri.file(node.fsPath), { selection: new Range(node.line - 1, 0, node.line - 1, 0) }],
+        };
+        return item;
+    }
 }
 
 function paint(editor: TextEditor, lines: PerfOverlayLine[]): void {
