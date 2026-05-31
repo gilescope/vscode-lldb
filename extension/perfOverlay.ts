@@ -11,7 +11,7 @@
 // the DAP session at `src/dap/yadap/session/perf.rs`.
 
 import {
-    debug, window, Uri,
+    commands, debug, window, ThemeColor, Uri,
     DecorationOptions, DebugAdapterTracker, DebugAdapterTrackerFactory,
     DebugSession, ExtensionContext,
     OverviewRulerLane, Range, StatusBarAlignment, StatusBarItem,
@@ -97,6 +97,14 @@ interface PerfStoppedSummary {
     unresolvedSamples: number;
 }
 
+// Accumulated instruction cost attributed to a source line by stepping
+// over it. `hits` counts how many times a step executed this line so the
+// annotation can show a running total rather than just the last step.
+interface StepCost {
+    inst: number;
+    hits: number;
+}
+
 interface SessionState {
     session: DebugSession;
     statusItem: StatusBarItem;
@@ -108,6 +116,19 @@ interface SessionState {
     // can detect they've been overtaken and bail out before painting.
     generation: number;
     enabled: boolean;
+    // --- per-step cost annotation (blame-style inline `after` text) ---
+    // The PC sampler can't profile a single step (microseconds → ~0
+    // samples), but the rusage/PMU counter gives exact instructions-
+    // retired per run window — and every step IS a run window. We pin
+    // that count to the line the step executed.
+    stepDecoration: TextEditorDecorationType;
+    // Location at the previous stop = the line the *next* step executes.
+    prevStop?: { fsPath: string; line: number };
+    // fsPath → (1-based line → accumulated cost). Reset per session.
+    stepCosts: Map<string, Map<number, StepCost>>;
+    // Toggled by bugstalker.togglePerfStepCosts. When false we stop
+    // recording and clear the inline annotations.
+    stepCostsEnabled: boolean;
 }
 
 let active: SessionState | undefined;
@@ -121,6 +142,8 @@ export function registerPerfOverlay(ctx: ExtensionContext): void {
     for (const type of ['bugstalker', 'lldb'] as const) {
         ctx.subscriptions.push(debug.registerDebugAdapterTrackerFactory(type, factory));
     }
+
+    ctx.subscriptions.push(commands.registerCommand('bugstalker.togglePerfStepCosts', togglePerfStepCosts));
 
     ctx.subscriptions.push(debug.onDidStartDebugSession(onSessionStart));
     ctx.subscriptions.push(debug.onDidTerminateDebugSession(onSessionEnd));
@@ -161,6 +184,12 @@ async function onSessionStart(session: DebugSession): Promise<void> {
         fileCache: new Map(),
         generation: 0,
         enabled: false,
+        // Bare handle — all styling is set per-decoration so the dim
+        // colour/margin survive (a per-option `after` replaces the
+        // type's `after` rather than merging with it).
+        stepDecoration: window.createTextEditorDecorationType({}),
+        stepCosts: new Map(),
+        stepCostsEnabled: true,
     };
 
     try {
@@ -200,17 +229,24 @@ function teardown(): void {
         }
         dt.dispose();
     }
+    for (const editor of window.visibleTextEditors) {
+        editor.setDecorations(active.stepDecoration, []);
+    }
+    active.stepDecoration.dispose();
     active.statusItem.dispose();
     active = undefined;
 }
 
 function makeTracker(session: DebugSession): DebugAdapterTracker {
     return {
-        onDidSendMessage: (m: { type?: string; event?: string; body?: { reason?: string; bs_perf?: PerfStoppedSummary } }) => {
+        onDidSendMessage: (m: { type?: string; event?: string; body?: { reason?: string; threadId?: number; bs_perf?: PerfStoppedSummary } }) => {
             if (m.type !== 'event' || m.event !== 'stopped') return;
             if (active?.session.id !== session.id) return;
             const summary = m.body?.bs_perf;
             if (summary) updateStatus(summary);
+            // Attribute this run window's instruction cost to the line the
+            // step executed (best-effort; needs an async stackTrace).
+            void attributeStep(m.body?.reason, m.body?.threadId, summary);
             // Fetch fresh per-file overlays for every visible Rust file.
             active.generation += 1;
             const gen = active.generation;
@@ -228,9 +264,15 @@ function updateStatus(summary: PerfStoppedSummary): void {
         // tooltip.
         parts.push(summary.diagnosis.emoji);
     }
-    parts.push(`perf ${formatCost(summary)}`);
-    if (summary.runInstructions && summary.runInstructions > 0) {
-        parts.push(`${formatScaled(summary.runInstructions, 'inst')}`);
+    // Cost cell prefers cycles (Linux PMU); on macOS there are no
+    // cycles, so lead with instructions retired (exact, meaningful even
+    // for one step) rather than a near-zero CPU-time that rounds to '-'.
+    const cost = formatCost(summary);
+    parts.push(`perf ${cost}`);
+    const haveInst = !!(summary.runInstructions && summary.runInstructions > 0);
+    // Don't repeat instructions when formatCost already used them.
+    if (haveInst && summary.runCycles > 0) {
+        parts.push(`${formatScaled(summary.runInstructions!, 'inst')}`);
     }
     if (summary.ipc && summary.ipc > 0) {
         parts.push(`IPC ${summary.ipc.toFixed(2)}`);
@@ -293,6 +335,12 @@ function describeMode(mode: PerfMode | undefined): string {
 /// the column is never blank.
 function formatCost(summary: PerfStoppedSummary): string {
     if (summary.runCycles > 0) return formatCycles(summary.runCycles);
+    // macOS: no cycle counter. Instructions retired is the exact,
+    // step-meaningful number; CPU-time on a single line is ~microseconds
+    // and far less informative, so prefer instructions over it.
+    if (summary.runInstructions && summary.runInstructions > 0) {
+        return formatScaled(summary.runInstructions, 'inst');
+    }
     if (summary.runCpuTimeNs && summary.runCpuTimeNs > 0) {
         return `${formatDurationNs(summary.runCpuTimeNs)} cpu`;
     }
@@ -355,7 +403,107 @@ function repaintAllVisible(): void {
             // Newly-visible editor — fetch its overlay.
             void refreshEditor(editor, active.generation);
         }
+        repaintStepCosts(editor.document.uri.fsPath);
     }
+}
+
+// Dim, italic, right-of-line — the GitLens-blame idiom. Set per
+// DecorationOptions (see stepDecoration note) so colour survives.
+const STEP_AFTER = {
+    margin: '0 0 0 2em',
+    color: new ThemeColor('editorCodeLens.foreground'),
+    fontStyle: 'italic',
+} as const;
+
+// Lead with instructions retired — exact even for a single line and the
+// one metric that's meaningful at step granularity (cycles need the
+// macOS kperf entitlement; wall/CPU-time are dominated by debugger and
+// I/O overhead). `Σ … ×N` once a line has been stepped more than once.
+function formatStepCost(cost: StepCost): string {
+    const inst = formatScaled(cost.inst, 'inst');
+    return cost.hits > 1 ? `Σ ${inst} ×${cost.hits}` : `Δ ${inst}`;
+}
+
+// Top frame of the stopped thread = the source location now. Best-effort:
+// a failed/again-stale stackTrace just skips this step's attribution.
+async function topFrame(threadId: number): Promise<{ fsPath: string; line: number } | undefined> {
+    if (!active) return undefined;
+    try {
+        const resp = (await active.session.customRequest('stackTrace', {
+            threadId, startFrame: 0, levels: 1,
+        })) as { stackFrames?: Array<{ line?: number; source?: { path?: string } }> };
+        const f = resp.stackFrames?.[0];
+        if (f?.source?.path && typeof f.line === 'number') {
+            return { fsPath: f.source.path, line: f.line };
+        }
+    } catch { /* best-effort */ }
+    return undefined;
+}
+
+async function attributeStep(
+    reason: string | undefined,
+    threadId: number | undefined,
+    summary: PerfStoppedSummary | undefined,
+): Promise<void> {
+    if (!active || !active.stepCostsEnabled) return;
+    const here = threadId != null ? await topFrame(threadId) : undefined;
+    if (!active) return; // overtaken / torn down during the await
+    // Only steps map a cost to a single line. A continue/breakpoint runs
+    // arbitrary code, so smearing its cost onto one line would mislead —
+    // we just advance prevStop in that case.
+    const prev = active.prevStop;
+    const inst = summary?.runInstructions ?? 0;
+    if (reason === 'step' && prev && inst > 0) {
+        recordStepCost(prev.fsPath, prev.line, inst);
+        repaintStepCosts(prev.fsPath);
+    }
+    active.prevStop = here;
+}
+
+function recordStepCost(fsPath: string, line: number, inst: number): void {
+    if (!active) return;
+    let byLine = active.stepCosts.get(fsPath);
+    if (!byLine) {
+        byLine = new Map();
+        active.stepCosts.set(fsPath, byLine);
+    }
+    const cur = byLine.get(line);
+    if (cur) {
+        cur.inst += inst;
+        cur.hits += 1;
+    } else {
+        byLine.set(line, { inst, hits: 1 });
+    }
+}
+
+function repaintStepCosts(fsPath: string): void {
+    if (!active) return;
+    const editor = window.visibleTextEditors.find((e) => e.document.uri.fsPath === fsPath);
+    if (!editor) return;
+    const byLine = active.stepCostsEnabled ? active.stepCosts.get(fsPath) : undefined;
+    const decos: DecorationOptions[] = [];
+    if (byLine) {
+        for (const [line, cost] of byLine) {
+            const zb = Math.max(0, line - 1);
+            decos.push({
+                range: new Range(zb, 0, zb, 0),
+                renderOptions: { after: { contentText: `  ${formatStepCost(cost)}`, ...STEP_AFTER } },
+            });
+        }
+    }
+    editor.setDecorations(active.stepDecoration, decos);
+}
+
+function togglePerfStepCosts(): void {
+    if (!active) {
+        void window.showInformationMessage('BugStalker: no active debug session for per-step costs.');
+        return;
+    }
+    active.stepCostsEnabled = !active.stepCostsEnabled;
+    for (const editor of window.visibleTextEditors) {
+        repaintStepCosts(editor.document.uri.fsPath);
+    }
+    output.appendLine(`[perf] per-step cost annotations ${active.stepCostsEnabled ? 'on' : 'off'}`);
 }
 
 function paint(editor: TextEditor, lines: PerfOverlayLine[]): void {

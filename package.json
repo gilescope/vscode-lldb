@@ -49,9 +49,13 @@
         "onCommand:bugstalker.applyPatch",
         "onCommand:bugstalker.startEditContinue",
         "onCommand:bugstalker.stopEditContinue",
+        "onCommand:bugstalker.stepIntoSkipLibs",
+        "onCommand:bugstalker.stepIntoAnyFrame",
         "onCommand:lldb.applyPatch",
         "onCommand:lldb.startEditContinue",
-        "onCommand:lldb.stopEditContinue"
+        "onCommand:lldb.stopEditContinue",
+        "onCommand:lldb.stepIntoSkipLibs",
+        "onCommand:lldb.stepIntoAnyFrame"
     ],
     "contributes": {
         "languages": [],
@@ -90,6 +94,31 @@
                 "category": "BugStalker",
                 "command": "lldb.stopEditContinue",
                 "title": "Stop Edit and Continue"
+            },
+            {
+                "category": "BugStalker",
+                "command": "bugstalker.stepIntoSkipLibs",
+                "title": "Step Into (Skip Libraries)"
+            },
+            {
+                "category": "BugStalker",
+                "command": "bugstalker.stepIntoAnyFrame",
+                "title": "Step Into (Any Frame)"
+            },
+            {
+                "category": "BugStalker",
+                "command": "bugstalker.togglePerfStepCosts",
+                "title": "Toggle Per-Step Cost Annotations"
+            },
+            {
+                "category": "BugStalker",
+                "command": "lldb.stepIntoSkipLibs",
+                "title": "Step Into (Skip Libraries)"
+            },
+            {
+                "category": "BugStalker",
+                "command": "lldb.stepIntoAnyFrame",
+                "title": "Step Into (Any Frame)"
             }
         ],
         "keybindings": [
@@ -99,9 +128,24 @@
                 "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
             },
             {
-                "command": "workbench.action.debug.stepInto",
+                "command": "bugstalker.stepIntoSkipLibs",
                 "key": "alt+right",
-                "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+                "when": "inDebugMode && debugType == 'bugstalker'"
+            },
+            {
+                "command": "bugstalker.stepIntoAnyFrame",
+                "key": "shift+alt+right",
+                "when": "inDebugMode && debugType == 'bugstalker'"
+            },
+            {
+                "command": "lldb.stepIntoSkipLibs",
+                "key": "alt+right",
+                "when": "inDebugMode && debugType == 'lldb'"
+            },
+            {
+                "command": "lldb.stepIntoAnyFrame",
+                "key": "shift+alt+right",
+                "when": "inDebugMode && debugType == 'lldb'"
             },
             {
                 "command": "workbench.action.debug.stepOut",
@@ -127,6 +171,12 @@
                 "bugstalker.logFile": {
                     "description": "Optional path. When set, BugStalker writes adapter diagnostics here (passed to the binary as `--dap-log-file`).",
                     "type": "string",
+                    "scope": "resource"
+                },
+                "bugstalker.focusPanicCulprit": {
+                    "markdownDescription": "On a break-on-panic stop, focus the user frame that actually panicked: deemphasize the panic-runtime frames (so the editor doesn't pop a toolchain tab) and report the exact panic line from the `#[track_caller]` location. Turn off for a vanilla stack — every frame navigable, raw DWARF lines. A `focusPanicCulprit` field in `launch.json` overrides this per session.",
+                    "type": "boolean",
+                    "default": true,
                     "scope": "resource"
                 },
                 "bugstalker.adapterEnv": {
@@ -212,6 +262,10 @@
                                 "type": "boolean",
                                 "default": false
                             },
+                            "focusPanicCulprit": {
+                                "markdownDescription": "Override the `bugstalker.focusPanicCulprit` setting for this session. When set, a break-on-panic stop focuses the panicking user frame (deemphasizing the panic runtime and reporting the exact `#[track_caller]` line). Leave unset to inherit the user/workspace setting (default `true`).",
+                                "type": "boolean"
+                            },
                             "editContinue": {
                                 "description": "Enable BugStalker edit-and-continue for supported Cargo launches. Set false to opt out.",
                                 "type": "boolean",
@@ -270,6 +324,10 @@
                                     "integer",
                                     "string"
                                 ]
+                            },
+                            "focusPanicCulprit": {
+                                "markdownDescription": "Override the `bugstalker.focusPanicCulprit` setting for this session. When set, a break-on-panic stop focuses the panicking user frame (deemphasizing the panic runtime and reporting the exact `#[track_caller]` line). Leave unset to inherit the user/workspace setting (default `true`).",
+                                "type": "boolean"
                             }
                         }
                     }
