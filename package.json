@@ -156,6 +156,21 @@
                 "command": "workbench.action.debug.stepBack",
                 "key": "alt+up",
                 "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+            },
+            {
+                "command": "workbench.action.debug.stepOver",
+                "key": "shift+alt+down",
+                "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+            },
+            {
+                "command": "workbench.action.debug.stepOut",
+                "key": "shift+alt+left",
+                "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+            },
+            {
+                "command": "workbench.action.debug.stepBack",
+                "key": "shift+alt+up",
+                "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
             }
         ],
         "configuration": {
