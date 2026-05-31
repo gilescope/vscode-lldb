@@ -31,9 +31,6 @@ const HEAT_TIERS: ReadonlyArray<{ readonly max: number; readonly colour: string 
     { max: 0.75, colour: '#ff9e64' }, // hot — orange
     { max: 1.01, colour: '#f7768e' }, // hottest — red-pink
 ];
-// Tier labels, index-aligned with HEAT_TIERS — surfaced in hovers so the
-// blue→red scale is self-explanatory.
-const TIER_NAMES: readonly string[] = ['cold', 'warm', 'hot', 'hottest'];
 
 // Field names mirror the DAP JSON wire format from the BugStalker
 // adapter (src/dap/yadap/session/perf.rs), which is camelCase
@@ -124,9 +121,10 @@ interface SessionState {
     // The PC sampler can't profile a single step (microseconds → ~0
     // samples), but the rusage/PMU counter gives exact instructions-
     // retired per run window — and every step IS a run window. We pin
-    // that count to the line the step executed — rendered as a gutter
-    // heat bar (one decoration type per heat tier), exact count on hover.
-    stepDecorations: TextEditorDecorationType[];
+    // that count to the line the step executed — rendered as a narrow
+    // fixed-width `before` column (GitLens file-blame style): per-line
+    // instruction count + heat-coloured left border, code shifted right.
+    stepColumn: TextEditorDecorationType;
     // Location at the previous stop = the line the *next* step executes.
     prevStop?: { fsPath: string; line: number };
     // fsPath → (1-based line → accumulated cost). Reset per session.
@@ -203,9 +201,9 @@ function bindTo(session: DebugSession): void {
         fileCache: new Map(),
         generation: 0,
         enabled: false,
-        // Gutter heat bars for accumulated per-step instruction cost,
-        // one decoration type per heat tier (same look as the sampler).
-        stepDecorations: HEAT_TIERS.map((tier) => buildDecorationType(tier.colour)),
+        // Narrow `before`-column for per-step cost (file-blame style).
+        // Empty handle — all styling is set per-line in renderOptions.before.
+        stepColumn: window.createTextEditorDecorationType({}),
         stepCosts: new Map(),
         stepCostsEnabled: true,
     };
@@ -254,12 +252,10 @@ function teardown(): void {
         }
         dt.dispose();
     }
-    for (const dt of active.stepDecorations) {
-        for (const editor of window.visibleTextEditors) {
-            editor.setDecorations(dt, []);
-        }
-        dt.dispose();
+    for (const editor of window.visibleTextEditors) {
+        editor.setDecorations(active.stepColumn, []);
     }
+    active.stepColumn.dispose();
     active.statusItem.dispose();
     active = undefined;
     stepCostsProvider?.refresh(); // empties the sidebar
@@ -497,44 +493,53 @@ function recordStepCost(fsPath: string, line: number, inst: number): void {
     }
 }
 
-// Paint accumulated per-step instruction cost as a gutter heat bar
-// (same pipeline as the sampler overlay), heat = line cost / hottest
-// line cost in this file. Exact counts live in the hover — keeps the
-// code text untouched, unlike a trailing `after` annotation.
+// Compact magnitude, fixed-ish width for column alignment: 92, 18k, 3.8M, 1.2G.
+function formatCompact(v: number): string {
+    if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(1)}G`;
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000) return `${Math.round(v / 1_000)}k`;
+    return `${v}`;
+}
+
+// Render per-step cost as a narrow fixed-width `before` column, à la
+// GitLens "toggle file blame": every line gets a same-width cell so the
+// code shifts right as one block (blank cells where no cost), and the
+// instruction count + heat-coloured left border land on stepped lines.
+// border/padding/background aren't on the attachment API, so they ride
+// in on the `textDecoration` CSS-injection trick GitLens uses.
 function repaintStepCosts(fsPath: string): void {
     if (!active) return;
     const editor = window.visibleTextEditors.find((e) => e.document.uri.fsPath === fsPath);
     if (!editor) return;
     const byLine = active.stepCostsEnabled ? active.stepCosts.get(fsPath) : undefined;
-    const buckets: DecorationOptions[][] = active.stepDecorations.map((): DecorationOptions[] => []);
-    if (byLine && byLine.size > 0) {
-        let max = 0;
-        for (const cost of byLine.values()) max = Math.max(max, cost.inst);
-        for (const [line, cost] of byLine) {
-            const heat = max > 0 ? cost.inst / max : 0;
-            const tier = pickTier(heat);
-            const zb = Math.min(Math.max(0, line - 1), editor.document.lineCount - 1);
-            buckets[tier].push({
-                // Zero-width point at col 0: renders the gutter icon for
-                // this line WITHOUT overlapping the code text, so it can't
-                // interfere with the debug/rust-analyzer hover. (A gutter
-                // icon isn't hoverable anyway — exact numbers live in the
-                // Step Costs sidebar.)
-                range: new Range(zb, 0, zb, 0),
-                hoverMessage:
-                    `**BugStalker step cost** — ${TIER_NAMES[tier]} ` +
-                    `(${(heat * 100).toFixed(0)}% of this file's hottest stepped line)\n\n` +
-                    `- instructions: ${cost.inst.toLocaleString()}\n` +
-                    `- steps over line: ${cost.hits}` +
-                    (cost.hits > 1
-                        ? `\n- avg/step: ${Math.round(cost.inst / cost.hits).toLocaleString()}`
-                        : ''),
-            });
-        }
+    if (!byLine || byLine.size === 0) {
+        editor.setDecorations(active.stepColumn, []);
+        return;
     }
-    for (let i = 0; i < active.stepDecorations.length; i += 1) {
-        editor.setDecorations(active.stepDecorations[i], buckets[i]);
+    let max = 0;
+    for (const cost of byLine.values()) max = Math.max(max, cost.inst);
+
+    const dim = new ThemeColor('editorCodeLens.foreground');
+    const opts: DecorationOptions[] = [];
+    for (let ln = 0; ln < editor.document.lineCount; ln += 1) {
+        const cost = byLine.get(ln + 1);
+        const tierHex = cost ? HEAT_TIERS[pickTier(cost.inst / max)].colour : 'transparent';
+        opts.push({
+            range: new Range(ln, 0, ln, 0),
+            renderOptions: {
+                before: {
+                    contentText: cost ? formatCompact(cost.inst).padStart(5) : '',
+                    color: dim,
+                    width: '6ch',
+                    margin: '0 1ch 0 0',
+                    backgroundColor: 'rgba(127,127,127,0.06)',
+                    textDecoration:
+                        `none; border-left: 3px solid ${tierHex}; padding-left: 5px; box-sizing: border-box;`,
+                },
+            },
+        });
     }
+    editor.setDecorations(active.stepColumn, opts);
 }
 
 function togglePerfStepCosts(): void {
