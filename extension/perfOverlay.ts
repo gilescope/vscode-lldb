@@ -11,7 +11,7 @@
 // the DAP session at `src/dap/yadap/session/perf.rs`.
 
 import {
-    commands, debug, window, ThemeColor, Uri,
+    commands, debug, window, Uri,
     DecorationOptions, DebugAdapterTracker, DebugAdapterTrackerFactory,
     DebugSession, ExtensionContext,
     OverviewRulerLane, Range, StatusBarAlignment, StatusBarItem,
@@ -120,8 +120,9 @@ interface SessionState {
     // The PC sampler can't profile a single step (microseconds → ~0
     // samples), but the rusage/PMU counter gives exact instructions-
     // retired per run window — and every step IS a run window. We pin
-    // that count to the line the step executed.
-    stepDecoration: TextEditorDecorationType;
+    // that count to the line the step executed — rendered as a gutter
+    // heat bar (one decoration type per heat tier), exact count on hover.
+    stepDecorations: TextEditorDecorationType[];
     // Location at the previous stop = the line the *next* step executes.
     prevStop?: { fsPath: string; line: number };
     // fsPath → (1-based line → accumulated cost). Reset per session.
@@ -184,10 +185,9 @@ async function onSessionStart(session: DebugSession): Promise<void> {
         fileCache: new Map(),
         generation: 0,
         enabled: false,
-        // Bare handle — all styling is set per-decoration so the dim
-        // colour/margin survive (a per-option `after` replaces the
-        // type's `after` rather than merging with it).
-        stepDecoration: window.createTextEditorDecorationType({}),
+        // Gutter heat bars for accumulated per-step instruction cost,
+        // one decoration type per heat tier (same look as the sampler).
+        stepDecorations: HEAT_TIERS.map((tier) => buildDecorationType(tier.colour)),
         stepCosts: new Map(),
         stepCostsEnabled: true,
     };
@@ -229,10 +229,12 @@ function teardown(): void {
         }
         dt.dispose();
     }
-    for (const editor of window.visibleTextEditors) {
-        editor.setDecorations(active.stepDecoration, []);
+    for (const dt of active.stepDecorations) {
+        for (const editor of window.visibleTextEditors) {
+            editor.setDecorations(dt, []);
+        }
+        dt.dispose();
     }
-    active.stepDecoration.dispose();
     active.statusItem.dispose();
     active = undefined;
 }
@@ -407,23 +409,6 @@ function repaintAllVisible(): void {
     }
 }
 
-// Dim, italic, right-of-line — the GitLens-blame idiom. Set per
-// DecorationOptions (see stepDecoration note) so colour survives.
-const STEP_AFTER = {
-    margin: '0 0 0 2em',
-    color: new ThemeColor('editorCodeLens.foreground'),
-    fontStyle: 'italic',
-} as const;
-
-// Lead with instructions retired — exact even for a single line and the
-// one metric that's meaningful at step granularity (cycles need the
-// macOS kperf entitlement; wall/CPU-time are dominated by debugger and
-// I/O overhead). `Σ … ×N` once a line has been stepped more than once.
-function formatStepCost(cost: StepCost): string {
-    const inst = formatScaled(cost.inst, 'inst');
-    return cost.hits > 1 ? `Σ ${inst} ×${cost.hits}` : `Δ ${inst}`;
-}
-
 // Top frame of the stopped thread = the source location now. Best-effort:
 // a failed/again-stale stackTrace just skips this step's attribution.
 async function topFrame(threadId: number): Promise<{ fsPath: string; line: number } | undefined> {
@@ -476,22 +461,38 @@ function recordStepCost(fsPath: string, line: number, inst: number): void {
     }
 }
 
+// Paint accumulated per-step instruction cost as a gutter heat bar
+// (same pipeline as the sampler overlay), heat = line cost / hottest
+// line cost in this file. Exact counts live in the hover — keeps the
+// code text untouched, unlike a trailing `after` annotation.
 function repaintStepCosts(fsPath: string): void {
     if (!active) return;
     const editor = window.visibleTextEditors.find((e) => e.document.uri.fsPath === fsPath);
     if (!editor) return;
     const byLine = active.stepCostsEnabled ? active.stepCosts.get(fsPath) : undefined;
-    const decos: DecorationOptions[] = [];
-    if (byLine) {
+    const buckets: DecorationOptions[][] = active.stepDecorations.map((): DecorationOptions[] => []);
+    if (byLine && byLine.size > 0) {
+        let max = 0;
+        for (const cost of byLine.values()) max = Math.max(max, cost.inst);
         for (const [line, cost] of byLine) {
+            const heat = max > 0 ? cost.inst / max : 0;
+            const tier = pickTier(heat);
             const zb = Math.max(0, line - 1);
-            decos.push({
+            buckets[tier].push({
                 range: new Range(zb, 0, zb, 0),
-                renderOptions: { after: { contentText: `  ${formatStepCost(cost)}`, ...STEP_AFTER } },
+                hoverMessage:
+                    `**BugStalker step cost**\n\n` +
+                    `- instructions: ${cost.inst.toLocaleString()}\n` +
+                    `- steps over line: ${cost.hits}` +
+                    (cost.hits > 1
+                        ? `\n- avg/step: ${Math.round(cost.inst / cost.hits).toLocaleString()}`
+                        : ''),
             });
         }
     }
-    editor.setDecorations(active.stepDecoration, decos);
+    for (let i = 0; i < active.stepDecorations.length; i += 1) {
+        editor.setDecorations(active.stepDecorations[i], buckets[i]);
+    }
 }
 
 function togglePerfStepCosts(): void {
@@ -550,7 +551,9 @@ function buildDecorationType(colour: string): TextEditorDecorationType {
 // glance. Bundled as a data URI so the extension ships no image files.
 function heatSvgUri(colour: string): Uri {
     const svg =
-        `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>` +
+        // width/height (not just viewBox) — some VS Code versions won't
+        // size a gutter data: URI without explicit pixel dimensions.
+        `<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'>` +
         `<rect x='6' y='2' width='4' height='12' rx='1' ry='1' fill='${colour}'/>` +
         `</svg>`;
     const encoded = Buffer.from(svg, 'utf8').toString('base64');
