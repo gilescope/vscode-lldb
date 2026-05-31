@@ -171,16 +171,26 @@ function shouldEnable(cfg: { perfOverlay?: boolean }): boolean {
     return cfg.perfOverlay !== false;
 }
 
-async function onSessionStart(session: DebugSession): Promise<void> {
+function onSessionStart(session: DebugSession): void {
     if (!isBugStalkerSession(session)) return;
     if (!shouldEnable(session.configuration as { perfOverlay?: boolean })) return;
-    if (active) teardown(); // one overlay at a time
+    // Bind only if nothing is active yet. If another session already owns
+    // the overlay we leave it — the overlay then *follows* whichever
+    // session actually emits a stopped event (see makeTracker). This is
+    // what keeps the EnC prebuild-fallback double-launch from parking the
+    // overlay on an idle session while the user steps the other one.
+    if (!active) bindTo(session);
+}
 
+// Synchronously create overlay UI state for `session` and kick off the
+// (async) enable. State must exist immediately so a stopped event that
+// triggered a rebind can paint without awaiting.
+function bindTo(session: DebugSession): void {
+    if (active) teardown();
     const statusItem = window.createStatusBarItem(StatusBarAlignment.Right, 90);
     statusItem.text = 'perf: -';
     statusItem.tooltip = 'BugStalker performance overlay';
     statusItem.show();
-
     active = {
         session,
         statusItem,
@@ -194,7 +204,12 @@ async function onSessionStart(session: DebugSession): Promise<void> {
         stepCosts: new Map(),
         stepCostsEnabled: true,
     };
+    const name = (session.configuration as { name?: string })?.name ?? session.id;
+    output.appendLine(`[perf] overlay → session "${name}" (${session.type})`);
+    void enableOverlay(session);
+}
 
+async function enableOverlay(session: DebugSession): Promise<void> {
     try {
         // bs answers with { enabled, unavailable?, intelPt?, kperf? }. A
         // successful *request* doesn't mean collection is live: a bs built
@@ -204,6 +219,7 @@ async function onSessionStart(session: DebugSession): Promise<void> {
         const resp = (await session.customRequest('bs/perfOverlayEnable', {})) as
             | { enabled?: boolean; unavailable?: string | null }
             | undefined;
+        if (active?.session.id !== session.id) return; // rebound away mid-flight
         if (resp?.enabled) {
             active.enabled = true;
             output.appendLine('[perf] overlay enabled');
@@ -214,8 +230,8 @@ async function onSessionStart(session: DebugSession): Promise<void> {
         }
     } catch (err) {
         output.appendLine(`[perf] enable failed: ${formatErr(err)}`);
-        // Keep the state object around — without enable we still pick
-        // up StoppedEvent.body.bs_perf for the status bar.
+        // Without enable we still pick up StoppedEvent.body.bs_perf and
+        // per-step costs; only the sampler gutter fetch needs `enabled`.
     }
 }
 
@@ -246,7 +262,16 @@ function makeTracker(session: DebugSession): DebugAdapterTracker {
     return {
         onDidSendMessage: (m: { type?: string; event?: string; body?: { reason?: string; threadId?: number; bs_perf?: PerfStoppedSummary } }) => {
             if (m.type !== 'event' || m.event !== 'stopped') return;
-            if (active?.session.id !== session.id) return;
+            // Follow the session the user is actually stepping: if a stop
+            // arrives for a session that isn't the bound one, rebind to it.
+            // (EnC fallback can launch a second, idle session that would
+            // otherwise hold the overlay.)
+            if (active?.session.id !== session.id) {
+                if (!isBugStalkerSession(session)) return;
+                if (!shouldEnable(session.configuration as { perfOverlay?: boolean })) return;
+                output.appendLine(`[perf] stop from unbound session — rebinding`);
+                bindTo(session);
+            }
             const summary = m.body?.bs_perf;
             if (summary) updateStatus(summary);
             // Attribute this run window's instruction cost to the line the
@@ -443,7 +468,11 @@ async function attributeStep(
     const inst = summary?.runInstructions ?? 0;
     if (reason === 'step' && prev && inst > 0) {
         recordStepCost(prev.fsPath, prev.line, inst);
+        const tracked = active.stepCosts.get(prev.fsPath)?.size ?? 0;
+        output.appendLine(`[perf] step ${shortPath(prev.fsPath)}:${prev.line} +${inst} inst (${tracked} lines tracked)`);
         repaintStepCosts(prev.fsPath);
+    } else if (reason === 'step') {
+        output.appendLine(`[perf] step not attributed (prev=${prev ? `${shortPath(prev.fsPath)}:${prev.line}` : 'none'}, inst=${inst}, here=${here ? 'ok' : 'no-frame'})`);
     }
     active.prevStop = here;
 }
