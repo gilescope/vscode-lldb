@@ -30,6 +30,9 @@ const HEAT_TIERS: ReadonlyArray<{ readonly max: number; readonly colour: string 
     { max: 0.75, colour: '#ff9e64' }, // hot — orange
     { max: 1.01, colour: '#f7768e' }, // hottest — red-pink
 ];
+// Tier labels, index-aligned with HEAT_TIERS — surfaced in hovers so the
+// blue→red scale is self-explanatory.
+const TIER_NAMES: readonly string[] = ['cold', 'warm', 'hot', 'hottest'];
 
 // Field names mirror the DAP JSON wire format from the BugStalker
 // adapter (src/dap/yadap/session/perf.rs), which is camelCase
@@ -477,11 +480,14 @@ function repaintStepCosts(fsPath: string): void {
         for (const [line, cost] of byLine) {
             const heat = max > 0 ? cost.inst / max : 0;
             const tier = pickTier(heat);
-            const zb = Math.max(0, line - 1);
+            const zb = Math.min(Math.max(0, line - 1), editor.document.lineCount - 1);
             buckets[tier].push({
-                range: new Range(zb, 0, zb, 0),
+                // Hover only fires over decorated *text*, not the gutter
+                // icon — so anchor it to the whole line's text range.
+                range: editor.document.lineAt(zb).range,
                 hoverMessage:
-                    `**BugStalker step cost**\n\n` +
+                    `**BugStalker step cost** — ${TIER_NAMES[tier]} ` +
+                    `(${(heat * 100).toFixed(0)}% of this file's hottest stepped line)\n\n` +
                     `- instructions: ${cost.inst.toLocaleString()}\n` +
                     `- steps over line: ${cost.hits}` +
                     (cost.hits > 1
@@ -512,8 +518,10 @@ function paint(editor: TextEditor, lines: PerfOverlayLine[]): void {
     const buckets: DecorationOptions[][] = HEAT_TIERS.map((): DecorationOptions[] => []);
     for (const line of lines) {
         const tier = pickTier(line.heat);
-        const zeroBased = Math.max(0, line.line - 1);
-        const range = new Range(zeroBased, 0, zeroBased, 0);
+        const zeroBased = Math.min(Math.max(0, line.line - 1), editor.document.lineCount - 1);
+        // Whole-line text range so the hover actually fires (a gutter
+        // icon alone isn't hoverable; a zero-width range has no target).
+        const range = editor.document.lineAt(zeroBased).range;
         const sharePct = (line.sampleShare * 100).toFixed(1);
         const hot = line.hottest ? ' [hottest]' : '';
         buckets[tier].push({
