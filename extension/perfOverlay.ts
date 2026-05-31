@@ -524,7 +524,7 @@ function repaintStepCosts(fsPath: string): void {
     for (let ln = 0; ln < editor.document.lineCount; ln += 1) {
         const cost = byLine.get(ln + 1);
         const tierHex = cost ? HEAT_TIERS[pickTier(cost.inst / max)].colour : 'transparent';
-        opts.push({
+        const cell: DecorationOptions = {
             range: new Range(ln, 0, ln, 0),
             renderOptions: {
                 before: {
@@ -537,7 +537,19 @@ function repaintStepCosts(fsPath: string): void {
                         `none; border-left: 3px solid ${tierHex}; padding-left: 5px; box-sizing: border-box;`,
                 },
             },
-        });
+        };
+        // The hover fires over the col-0 column cell (not the shifted code),
+        // so the exact count lives here without colliding with debug/RA hovers.
+        if (cost) {
+            cell.hoverMessage =
+                `**BugStalker step cost**\n\n` +
+                `- instructions: ${cost.inst.toLocaleString()}\n` +
+                `- steps over line: ${cost.hits}` +
+                (cost.hits > 1
+                    ? `\n- avg/step: ${Math.round(cost.inst / cost.hits).toLocaleString()}`
+                    : '');
+        }
+        opts.push(cell);
     }
     editor.setDecorations(active.stepColumn, opts);
 }
