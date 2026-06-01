@@ -546,6 +546,20 @@ function formatCompact(v: number): string {
     return `${v}`;
 }
 
+// Per-tier emoji shown in the margin cell, index-aligned with HEAT_TIERS.
+// Easy to swap for any scheme (🔥, thermometer, etc.).
+const TIER_EMOJI: readonly string[] = ['🔵', '🟡', '🟠', '🔴'];
+
+// #rrggbb → rgba(...) so the margin background can be a faint tint of the
+// line's heat colour (the attachment backgroundColor wants a CSS string).
+function tint(hex: string, alpha: number): string {
+    const h = hex.replace('#', '');
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
 // Render per-step cost as a narrow fixed-width `before` column, à la
 // GitLens "toggle file blame": every line gets a same-width cell so the
 // code shifts right as one block (blank cells where no cost), and the
@@ -568,7 +582,8 @@ function repaintStepCosts(fsPath: string): void {
     const opts: DecorationOptions[] = [];
     for (let ln = 0; ln < editor.document.lineCount; ln += 1) {
         const cost = byLine.get(ln + 1);
-        const tierHex = cost ? HEAT_TIERS[pickTier(cost.inst / max)].colour : 'transparent';
+        const tier = cost ? pickTier(cost.inst / max) : -1;
+        const tierHex = cost ? HEAT_TIERS[tier].colour : 'transparent';
         const cell: DecorationOptions = {
             // Cost cells span the first character so the hover has a target
             // (a zero-width range / gutter has none); blank cells stay
@@ -576,11 +591,14 @@ function repaintStepCosts(fsPath: string): void {
             range: cost ? new Range(ln, 0, ln, 1) : new Range(ln, 0, ln, 0),
             renderOptions: {
                 before: {
-                    contentText: cost ? formatCompact(cost.inst).padStart(5) : '',
+                    // emoji + right-aligned magnitude, e.g. "🔴 3.8M".
+                    contentText: cost ? `${TIER_EMOJI[tier]} ${formatCompact(cost.inst).padStart(5)}` : '',
                     color: dim,
-                    width: '6ch',
+                    width: '10ch',
                     margin: '0 1ch 0 0',
-                    backgroundColor: 'rgba(127,127,127,0.06)',
+                    // Background is now a faint tint of the line's heat colour
+                    // (was flat grey); empty cells keep a neutral band.
+                    backgroundColor: cost ? tint(tierHex, 0.18) : 'rgba(127,127,127,0.05)',
                     textDecoration:
                         `none; border-left: 3px solid ${tierHex}; padding-left: 5px; box-sizing: border-box;`,
                 },
