@@ -129,6 +129,14 @@ interface SessionState {
     prevStop?: { fsPath: string; line: number };
     // fsPath → (1-based line → accumulated cost). Reset per session.
     stepCosts: Map<string, Map<number, StepCost>>;
+    // Undo stack: one entry per forward step, so a reverse step (stepBack)
+    // can subtract exactly what the matching forward step added rather than
+    // double-counting when you re-walk a line.
+    stepHistory: Array<{ fsPath: string; line: number; inst: number }>;
+    // Last debug *navigation* command seen (next/stepIn/stepOut/stepBack/…),
+    // captured from onWillReceiveMessage — the stopped event alone can't tell
+    // a forward step from a reverse one.
+    lastCommand?: string;
     // Toggled by bugstalker.togglePerfStepCosts. When false we stop
     // recording and clear the inline annotations.
     stepCostsEnabled: boolean;
@@ -205,6 +213,7 @@ function bindTo(session: DebugSession): void {
         // Empty handle — all styling is set per-line in renderOptions.before.
         stepColumn: window.createTextEditorDecorationType({}),
         stepCosts: new Map(),
+        stepHistory: [],
         stepCostsEnabled: true,
     };
     const name = (session.configuration as { name?: string })?.name ?? session.id;
@@ -261,8 +270,21 @@ function teardown(): void {
     stepCostsProvider?.refresh(); // empties the sidebar
 }
 
+// Debug navigation requests we care about — used to tell a forward step
+// from a reverse step (stepBack), which the stopped event can't.
+const NAV_COMMANDS = new Set(['next', 'stepIn', 'stepOut', 'stepBack', 'continue', 'reverseContinue', 'bs/stepIn']);
+const FORWARD_STEPS = new Set(['next', 'stepIn', 'stepOut', 'bs/stepIn']);
+
 function makeTracker(session: DebugSession): DebugAdapterTracker {
     return {
+        // Requests heading TO the adapter — remember the last navigation
+        // command so attribution knows the direction of travel.
+        onWillReceiveMessage: (m: { type?: string; command?: string }) => {
+            if (active?.session.id !== session.id) return;
+            if (m.type === 'request' && m.command && NAV_COMMANDS.has(m.command)) {
+                active.lastCommand = m.command;
+            }
+        },
         onDidSendMessage: (m: { type?: string; event?: string; body?: { reason?: string; threadId?: number; bs_perf?: PerfStoppedSummary } }) => {
             if (m.type !== 'event' || m.event !== 'stopped') return;
             // Follow the session the user is actually stepping: if a stop
@@ -279,7 +301,7 @@ function makeTracker(session: DebugSession): DebugAdapterTracker {
             if (summary) updateStatus(summary);
             // Attribute this run window's instruction cost to the line the
             // step executed (best-effort; needs an async stackTrace).
-            void attributeStep(m.body?.reason, m.body?.threadId, summary);
+            void attributeStep(m.body?.threadId, summary);
             // Fetch fresh per-file overlays for every visible Rust file.
             active.generation += 1;
             const gen = active.generation;
@@ -457,20 +479,32 @@ async function topFrame(threadId: number): Promise<{ fsPath: string; line: numbe
 }
 
 async function attributeStep(
-    reason: string | undefined,
     threadId: number | undefined,
     summary: PerfStoppedSummary | undefined,
 ): Promise<void> {
     if (!active || !active.stepCostsEnabled) return;
+    const cmd = active.lastCommand;
+    active.lastCommand = undefined; // consume — one attribution per stop
     const here = threadId != null ? await topFrame(threadId) : undefined;
     if (!active) return; // overtaken / torn down during the await
-    // Only steps map a cost to a single line. A continue/breakpoint runs
-    // arbitrary code, so smearing its cost onto one line would mislead —
-    // we just advance prevStop in that case.
-    const prev = active.prevStop;
-    const inst = summary?.runInstructions ?? 0;
-    if (reason === 'step' && prev && inst > 0) {
+
+    if (cmd === 'stepBack') {
+        // Reverse step: undo the matching forward step's cost instead of
+        // adding, so re-walking a line doesn't double-count.
+        const last = active.stepHistory.pop();
+        if (last) {
+            unrecordStepCost(last.fsPath, last.line, last.inst);
+            repaintStepCosts(last.fsPath);
+            stepCostsProvider?.refresh();
+        }
+    } else if (cmd && FORWARD_STEPS.has(cmd) && active.prevStop && (summary?.runInstructions ?? 0) > 0) {
+        // Forward step: the run window's instructions executed the line we
+        // were parked on (prevStop). A continue/breakpoint isn't a step, so
+        // its (arbitrary) cost is never smeared onto one line.
+        const prev = active.prevStop;
+        const inst = summary!.runInstructions!;
         recordStepCost(prev.fsPath, prev.line, inst);
+        active.stepHistory.push({ fsPath: prev.fsPath, line: prev.line, inst });
         repaintStepCosts(prev.fsPath);
         stepCostsProvider?.refresh();
     }
@@ -491,6 +525,17 @@ function recordStepCost(fsPath: string, line: number, inst: number): void {
     } else {
         byLine.set(line, { inst, hits: 1 });
     }
+}
+
+// Inverse of recordStepCost — used when a reverse step undoes a forward one.
+function unrecordStepCost(fsPath: string, line: number, inst: number): void {
+    if (!active) return;
+    const byLine = active.stepCosts.get(fsPath);
+    const cur = byLine?.get(line);
+    if (!cur) return;
+    cur.inst -= inst;
+    cur.hits -= 1;
+    if (cur.hits <= 0 || cur.inst <= 0) byLine!.delete(line);
 }
 
 // Compact magnitude, fixed-ish width for column alignment: 92, 18k, 3.8M, 1.2G.
@@ -525,7 +570,10 @@ function repaintStepCosts(fsPath: string): void {
         const cost = byLine.get(ln + 1);
         const tierHex = cost ? HEAT_TIERS[pickTier(cost.inst / max)].colour : 'transparent';
         const cell: DecorationOptions = {
-            range: new Range(ln, 0, ln, 0),
+            // Cost cells span the first character so the hover has a target
+            // (a zero-width range / gutter has none); blank cells stay
+            // zero-width to avoid stealing hovers on un-stepped lines.
+            range: cost ? new Range(ln, 0, ln, 1) : new Range(ln, 0, ln, 0),
             renderOptions: {
                 before: {
                     contentText: cost ? formatCompact(cost.inst).padStart(5) : '',
