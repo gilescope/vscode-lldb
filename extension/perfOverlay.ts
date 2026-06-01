@@ -26,7 +26,7 @@ import { output } from './main';
 //   - cold, warm, hot, hottest
 // Colours are tuned to be visible on both dark and light themes.
 const HEAT_TIERS: ReadonlyArray<{ readonly max: number; readonly colour: string }> = [
-    { max: 0.25, colour: '#7aa2f7' }, // cold — blue
+    { max: 0.25, colour: '#9ece6a' }, // cheap — green (good)
     { max: 0.50, colour: '#e0af68' }, // warm — amber
     { max: 0.75, colour: '#ff9e64' }, // hot — orange
     { max: 1.01, colour: '#f7768e' }, // hottest — red-pink
@@ -205,7 +205,7 @@ function bindTo(session: DebugSession): void {
     active = {
         session,
         statusItem,
-        decorations: HEAT_TIERS.map((tier) => buildDecorationType(tier.colour)),
+        decorations: [], // gutter heat bars retired — the column is the surface now
         fileCache: new Map(),
         generation: 0,
         enabled: false,
@@ -302,10 +302,6 @@ function makeTracker(session: DebugSession): DebugAdapterTracker {
             // Attribute this run window's instruction cost to the line the
             // step executed (best-effort; needs an async stackTrace).
             void attributeStep(m.body?.threadId, summary);
-            // Fetch fresh per-file overlays for every visible Rust file.
-            active.generation += 1;
-            const gen = active.generation;
-            void refreshVisible(gen);
         },
     };
 }
@@ -450,14 +446,6 @@ async function refreshEditor(editor: TextEditor, gen: number): Promise<void> {
 function repaintAllVisible(): void {
     if (!active) return;
     for (const editor of window.visibleTextEditors) {
-        if (!rustEditor(editor)) continue;
-        const cached = active.fileCache.get(editor.document.uri.fsPath);
-        if (cached) {
-            paint(editor, cached);
-        } else if (active.enabled) {
-            // Newly-visible editor — fetch its overlay.
-            void refreshEditor(editor, active.generation);
-        }
         repaintStepCosts(editor.document.uri.fsPath);
     }
 }
@@ -548,7 +536,7 @@ function formatCompact(v: number): string {
 
 // Per-tier emoji shown in the margin cell, index-aligned with HEAT_TIERS.
 // Easy to swap for any scheme (🔥, thermometer, etc.).
-const TIER_EMOJI: readonly string[] = ['🔵', '🟡', '🟠', '🔴'];
+const TIER_EMOJI: readonly string[] = ['🟢', '🟡', '🟠', '🔴'];
 
 // #rrggbb → rgba(...) so the margin background can be a faint tint of the
 // line's heat colour (the attachment backgroundColor wants a CSS string).
@@ -651,7 +639,7 @@ interface StepCostNode { fsPath: string; line: number; cost: StepCost; tier: num
 
 // Index-aligned with HEAT_TIERS — built-in chart ThemeColors so the dot
 // matches the gutter blue→red without shipping custom colours.
-const TIER_CHART_COLORS: readonly string[] = ['charts.blue', 'charts.yellow', 'charts.orange', 'charts.red'];
+const TIER_CHART_COLORS: readonly string[] = ['charts.green', 'charts.yellow', 'charts.orange', 'charts.red'];
 
 let stepCostsProvider: StepCostsProvider | undefined;
 
