@@ -148,6 +148,12 @@ let active: SessionState | undefined;
 // can read/write it without a live debug session. Cleared on each bind.
 const stepCosts = new Map<string, Map<number, StepCost>>();
 
+// The line the Step Costs pane reports on: the line a forward step just
+// executed (so you see what that step cost), or the line you're stopped at
+// otherwise. The pane is our stand-in for the per-line hover, which VS Code
+// reserves for the debugger's value evaluation during a session.
+let focusLine: { fsPath: string; line: number } | undefined;
+
 export function registerPerfOverlay(ctx: ExtensionContext): void {
     const factory: DebugAdapterTrackerFactory = {
         createDebugAdapterTracker(session: DebugSession): DebugAdapterTracker {
@@ -227,6 +233,7 @@ function bindTo(session: DebugSession): void {
         stepCostsEnabled: true,
     };
     stepCosts.clear(); // fresh costs for the new session
+    focusLine = undefined;
     const name = (session.configuration as { name?: string })?.name ?? session.id;
     output.appendLine(`[perf] overlay → session "${name}" (${session.type})`);
     stepCostsProvider?.refresh(); // fresh (empty) costs for the new session
@@ -487,6 +494,11 @@ async function attributeStep(
     const here = threadId != null ? await topFrame(threadId) : undefined;
     if (!active) return; // overtaken / torn down during the await
 
+    // The pane reports on `focusLine`: by default the line we're stopped at,
+    // but a forward step points it at the line just executed so you see what
+    // that step cost (the cost lands on prevStop, not on `here`).
+    focusLine = here;
+
     if (cmd === 'stepBack') {
         // Reverse step: undo the matching forward step's cost instead of
         // adding, so re-walking a line doesn't double-count.
@@ -494,7 +506,6 @@ async function attributeStep(
         if (last) {
             unrecordStepCost(last.fsPath, last.line, last.inst);
             repaintStepCosts(last.fsPath);
-            stepCostsProvider?.refresh();
         }
     } else if (cmd && FORWARD_STEPS.has(cmd) && active.prevStop && (summary?.runInstructions ?? 0) > 0) {
         // Forward step: the run window's instructions executed the line we
@@ -505,9 +516,10 @@ async function attributeStep(
         recordStepCost(prev.fsPath, prev.line, inst);
         active.stepHistory.push({ fsPath: prev.fsPath, line: prev.line, inst });
         repaintStepCosts(prev.fsPath);
-        stepCostsProvider?.refresh();
+        focusLine = { fsPath: prev.fsPath, line: prev.line };
     }
     active.prevStop = here;
+    stepCostsProvider?.refresh(); // pane follows focusLine on every stop
 }
 
 function recordStepCost(fsPath: string, line: number, inst: number): void {
@@ -627,6 +639,7 @@ function togglePerfStepCosts(): void {
 function clearStepCosts(): void {
     if (!active) return;
     stepCosts.clear();
+    focusLine = undefined;
     for (const editor of window.visibleTextEditors) {
         repaintStepCosts(editor.document.uri.fsPath);
     }
@@ -635,18 +648,23 @@ function clearStepCosts(): void {
 }
 
 // --- Step Costs sidebar (TreeView) -----------------------------------
-// Ranked, exact, click-to-jump — the home for the numbers the gutter
-// bars only hint at (a gutter icon can't be hovered, and inline text
-// clutters the code). Reads live from `active.stepCosts`.
-interface StepCostNode { fsPath: string; line: number; cost: StepCost; tier: number }
+// Per-line readout for the line currently in focus (the line a step just
+// executed, or the line you're stopped at). This is the stand-in for the
+// per-line hover, which VS Code reserves for the debugger during a session.
+// Rendered as a small key/value list: a header (file:line, click to jump)
+// followed by instructions / steps / avg rows.
+type PaneNode =
+    | { kind: 'header'; fsPath: string; line: number; cost?: StepCost; tier: number }
+    | { kind: 'metric'; label: string; value: string }
+    | { kind: 'info'; text: string };
 
 // Index-aligned with HEAT_TIERS — built-in chart ThemeColors so the dot
-// matches the gutter blue→red without shipping custom colours.
+// matches the gutter green→red without shipping custom colours.
 const TIER_CHART_COLORS: readonly string[] = ['charts.green', 'charts.yellow', 'charts.orange', 'charts.red'];
 
 let stepCostsProvider: StepCostsProvider | undefined;
 
-class StepCostsProvider implements TreeDataProvider<StepCostNode> {
+class StepCostsProvider implements TreeDataProvider<PaneNode> {
     private readonly emitter = new EventEmitter<void>();
     readonly onDidChangeTreeData: Event<void> = this.emitter.event;
 
@@ -654,28 +672,48 @@ class StepCostsProvider implements TreeDataProvider<StepCostNode> {
         this.emitter.fire();
     }
 
-    getChildren(): StepCostNode[] {
-        if (!active || !active.stepCostsEnabled) return [];
-        const rows: Array<{ fsPath: string; line: number; cost: StepCost }> = [];
+    // Flat list: header + metric rows for the focus line. (No `element`
+    // arg used — the list is one level deep.)
+    getChildren(): PaneNode[] {
+        if (active && !active.stepCostsEnabled) return [];
+        if (!focusLine) return [{ kind: 'info', text: 'Step to record per-line cost' }];
+
+        const byLine = stepCosts.get(focusLine.fsPath);
+        const cost = byLine?.get(focusLine.line);
+        // Tier relative to this file's hottest stepped line.
         let max = 0;
-        for (const [fsPath, byLine] of stepCosts) {
-            for (const [line, cost] of byLine) {
-                rows.push({ fsPath, line, cost });
-                if (cost.inst > max) max = cost.inst;
-            }
+        if (byLine) for (const c of byLine.values()) max = Math.max(max, c.inst);
+        const tier = cost && max > 0 ? pickTier(cost.inst / max) : 0;
+
+        const header: PaneNode = { kind: 'header', fsPath: focusLine.fsPath, line: focusLine.line, cost, tier };
+        if (!cost) {
+            return [header, { kind: 'info', text: 'no recorded cost for this line yet' }];
         }
-        rows.sort((a, b) => b.cost.inst - a.cost.inst);
-        return rows.map((r) => ({ ...r, tier: pickTier(max > 0 ? r.cost.inst / max : 0) }));
+        const rows: PaneNode[] = [
+            header,
+            { kind: 'metric', label: 'instructions', value: cost.inst.toLocaleString() },
+            { kind: 'metric', label: 'steps over line', value: `${cost.hits}` },
+        ];
+        if (cost.hits > 1) {
+            rows.push({ kind: 'metric', label: 'avg/step', value: Math.round(cost.inst / cost.hits).toLocaleString() });
+        }
+        return rows;
     }
 
-    getTreeItem(node: StepCostNode): TreeItem {
+    getTreeItem(node: PaneNode): TreeItem {
+        if (node.kind === 'info') {
+            const item = new TreeItem(node.text, TreeItemCollapsibleState.None);
+            item.iconPath = new ThemeIcon('info');
+            return item;
+        }
+        if (node.kind === 'metric') {
+            const item = new TreeItem(node.label, TreeItemCollapsibleState.None);
+            item.description = node.value;
+            return item;
+        }
+        // header
         const item = new TreeItem(`${shortPath(node.fsPath)}:${node.line}`, TreeItemCollapsibleState.None);
-        const hits = node.cost.hits > 1 ? ` ×${node.cost.hits}` : '';
-        item.description = `${formatScaled(node.cost.inst, 'inst')}${hits}`;
-        item.tooltip =
-            `${node.fsPath}:${node.line}\n` +
-            `${node.cost.inst.toLocaleString()} instructions over ${node.cost.hits} step(s)` +
-            (node.cost.hits > 1 ? `\navg ${Math.round(node.cost.inst / node.cost.hits).toLocaleString()}/step` : '');
+        item.description = node.cost ? `${formatScaled(node.cost.inst, 'inst')}` : '—';
         item.iconPath = new ThemeIcon('circle-filled', new ThemeColor(TIER_CHART_COLORS[node.tier]));
         item.command = {
             command: 'vscode.open',
@@ -804,8 +842,23 @@ export const _perfTest = {
         byLine.set(line, { inst, hits });
         stepCostsProvider?.refresh();
     },
+    // Point the Step Costs pane at a line (what a stop would do).
+    setFocus(fsPath: string, line: number): void {
+        focusLine = { fsPath, line };
+        stepCostsProvider?.refresh();
+    },
+    // Rendered pane rows as "label | description" strings, for assertions.
+    paneRows(): string[] {
+        if (!stepCostsProvider) return [];
+        return stepCostsProvider.getChildren().map((n) => {
+            const item = stepCostsProvider!.getTreeItem(n);
+            const label = typeof item.label === 'string' ? item.label : String(item.label?.label ?? '');
+            return item.description ? `${label} | ${item.description}` : label;
+        });
+    },
     clear(): void {
         stepCosts.clear();
+        focusLine = undefined;
         stepCostsProvider?.refresh();
     },
 };

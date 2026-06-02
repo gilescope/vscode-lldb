@@ -11,6 +11,8 @@ import * as vscode from 'vscode';
 
 interface PerfTestApi {
     setStepCost(fsPath: string, line: number, inst: number, hits?: number): void;
+    setFocus(fsPath: string, line: number): void;
+    paneRows(): string[];
     clear(): void;
 }
 
@@ -63,5 +65,41 @@ describe('per-step cost hover', () => {
             'vscode.executeHoverProvider', uri, new vscode.Position(2, 4),
         );
         assert.ok(!hoverText(hovers).includes('BugStalker step cost'), 'unexpected perf hover on un-costed line');
+    });
+});
+
+describe('step costs pane (focus-line readout)', () => {
+    let perf: PerfTestApi;
+    const f = '/tmp/bs-pane-fixture.rs';
+
+    before(async () => {
+        const ext = vscode.extensions.getExtension('vadimcn.vscode-lldb');
+        const api = (await ext!.activate()) as { _perfTest?: PerfTestApi };
+        perf = api!._perfTest!;
+    });
+    after(() => perf?.clear());
+
+    it('shows the exact detail for the focused line', () => {
+        perf.clear();
+        perf.setStepCost(f, 26, 3_777_494, 2);
+        perf.setFocus(f, 26);
+        const rows = perf.paneRows().join('\n');
+        assert.ok(/:26/.test(rows), `header missing line; rows:\n${rows}`);
+        assert.ok(rows.includes('instructions | 3,777,494'), `missing instructions row; rows:\n${rows}`);
+        assert.ok(rows.includes('steps over line | 2'), `missing steps row; rows:\n${rows}`);
+        assert.ok(rows.includes('avg/step | 1,888,747'), `missing avg row; rows:\n${rows}`);
+    });
+
+    it('says so when the focused line has no recorded cost', () => {
+        perf.clear();
+        perf.setFocus(f, 99);
+        const rows = perf.paneRows().join('\n');
+        assert.ok(/no recorded cost/.test(rows), `expected no-cost note; rows:\n${rows}`);
+    });
+
+    it('prompts to step when nothing is focused', () => {
+        perf.clear();
+        const rows = perf.paneRows().join('\n');
+        assert.ok(/Step to record/.test(rows), `expected step prompt; rows:\n${rows}`);
     });
 });
