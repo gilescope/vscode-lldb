@@ -97,14 +97,23 @@ interface PerfStoppedSummary {
         sampleShare: number;
     };
     unresolvedSamples: number;
+    // Memory-footprint change over the window, in bytes (signed). macOS
+    // only (rusage ri_phys_footprint delta); null on Linux. A cheap proxy
+    // for "did this step allocate" — footprint growth, not a malloc count.
+    physFootprintDelta?: number | null;
 }
 
-// Accumulated instruction cost attributed to a source line by stepping
-// over it. `hits` counts how many times a step executed this line so the
-// annotation can show a running total rather than just the last step.
+// Per-line step cost. `inst`/`hits` accumulate (the gutter column's heat
+// is relative accumulated instructions); the `last*` fields hold the most
+// recent step's metrics, which is what the pane reports ("since last step").
 interface StepCost {
     inst: number;
     hits: number;
+    lastInst: number;
+    lastCycles: number;
+    lastIpc: number | null;
+    lastDiagnosis: PerfDiagnosis | null;
+    lastMemDelta: number | null;
 }
 
 interface SessionState {
@@ -521,7 +530,7 @@ async function attributeStep(
         // its (arbitrary) cost is never smeared onto one line.
         const prev = active.prevStop;
         const inst = summary!.runInstructions!;
-        recordStepCost(prev.fsPath, prev.line, inst);
+        recordStepCost(prev.fsPath, prev.line, summary!);
         active.stepHistory.push({ fsPath: prev.fsPath, line: prev.line, inst });
         repaintStepCosts(prev.fsPath);
     }
@@ -532,7 +541,15 @@ async function attributeStep(
     stepCostsProvider?.refresh();
 }
 
-function recordStepCost(fsPath: string, line: number, inst: number): void {
+function recordStepCost(fsPath: string, line: number, summary: PerfStoppedSummary): void {
+    const inst = summary.runInstructions ?? 0;
+    const last = {
+        lastInst: inst,
+        lastCycles: summary.runCycles ?? 0,
+        lastIpc: summary.ipc ?? null,
+        lastDiagnosis: summary.diagnosis ?? null,
+        lastMemDelta: summary.physFootprintDelta ?? null,
+    };
     let byLine = stepCosts.get(fsPath);
     if (!byLine) {
         byLine = new Map();
@@ -542,8 +559,9 @@ function recordStepCost(fsPath: string, line: number, inst: number): void {
     if (cur) {
         cur.inst += inst;
         cur.hits += 1;
+        Object.assign(cur, last); // overwrite last-step metrics
     } else {
-        byLine.set(line, { inst, hits: 1 });
+        byLine.set(line, { inst, hits: 1, ...last });
     }
 }
 
@@ -699,15 +717,16 @@ class StepCostsProvider implements TreeDataProvider<PaneNode> {
         if (!cost) {
             return [header, { kind: 'info', text: 'no recorded cost for this line yet' }];
         }
-        const rows: PaneNode[] = [
+        // Last step's metrics ("since last step"). cycles/IPC are PMU-only,
+        // so '—' on macOS (no kperf entitlement); instructions + memory Δ
+        // come from the rusage path and are real there.
+        return [
             header,
-            { kind: 'metric', label: 'instructions', value: cost.inst.toLocaleString() },
-            { kind: 'metric', label: 'steps over line', value: `${cost.hits}` },
+            { kind: 'metric', label: 'instructions', value: cost.lastInst.toLocaleString() },
+            { kind: 'metric', label: 'cycles', value: cost.lastCycles > 0 ? cost.lastCycles.toLocaleString() : '—' },
+            { kind: 'metric', label: 'IPC', value: cost.lastIpc != null && cost.lastIpc > 0 ? cost.lastIpc.toFixed(2) : '—' },
+            { kind: 'metric', label: 'memory Δ', value: cost.lastMemDelta != null ? formatBytesSigned(cost.lastMemDelta) : '—' },
         ];
-        if (cost.hits > 1) {
-            rows.push({ kind: 'metric', label: 'avg/step', value: Math.round(cost.inst / cost.hits).toLocaleString() });
-        }
-        return rows;
     }
 
     getTreeItem(node: PaneNode): TreeItem {
@@ -721,9 +740,11 @@ class StepCostsProvider implements TreeDataProvider<PaneNode> {
             item.description = node.value;
             return item;
         }
-        // header
+        // header — line + the step's categorisation as the at-a-glance summary
         const item = new TreeItem(`${shortPath(node.fsPath)}:${node.line}`, TreeItemCollapsibleState.None);
-        item.description = node.cost ? `${formatScaled(node.cost.inst, 'inst')}` : '—';
+        const diag = node.cost?.lastDiagnosis;
+        item.description = diag ? `${diag.emoji} ${diag.label}` : node.cost ? '' : '—';
+        if (diag) item.tooltip = `${diag.emoji} ${diag.label}: ${diag.summary}\n${diag.hint}`;
         item.iconPath = new ThemeIcon('circle-filled', new ThemeColor(TIER_CHART_COLORS[node.tier]));
         item.command = {
             command: 'vscode.open',
@@ -820,6 +841,17 @@ function formatErr(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
 }
 
+// Signed byte delta: "+1.2 MB", "-4.0 KB", "0 B".
+function formatBytesSigned(bytes: number): string {
+    if (bytes === 0) return '0 B';
+    const sign = bytes < 0 ? '-' : '+';
+    const a = Math.abs(bytes);
+    if (a >= 1024 * 1024 * 1024) return `${sign}${(a / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+    if (a >= 1024 * 1024) return `${sign}${(a / (1024 * 1024)).toFixed(1)} MB`;
+    if (a >= 1024) return `${sign}${(a / 1024).toFixed(1)} KB`;
+    return `${sign}${a} B`;
+}
+
 // Exact per-line count on hover. Unlike a decoration hoverMessage (which
 // competed with the debug value hover and left it empty), a HoverProvider
 // returns a scoped result VS Code merges — and `executeHoverProvider` can
@@ -843,13 +875,27 @@ class StepCostHoverProvider implements HoverProvider {
 // Test hook returned from activate() — lets the @vscode/test-electron suite
 // inject step costs and query the HoverProvider without a live debug session.
 export const _perfTest = {
-    setStepCost(fsPath: string, line: number, inst: number, hits = 1): void {
+    setStepCost(
+        fsPath: string,
+        line: number,
+        inst: number,
+        hits = 1,
+        extra?: { cycles?: number; ipc?: number | null; diagnosis?: PerfDiagnosis | null; memDelta?: number | null },
+    ): void {
         let byLine = stepCosts.get(fsPath);
         if (!byLine) {
             byLine = new Map();
             stepCosts.set(fsPath, byLine);
         }
-        byLine.set(line, { inst, hits });
+        byLine.set(line, {
+            inst,
+            hits,
+            lastInst: inst,
+            lastCycles: extra?.cycles ?? 0,
+            lastIpc: extra?.ipc ?? null,
+            lastDiagnosis: extra?.diagnosis ?? null,
+            lastMemDelta: extra?.memDelta ?? null,
+        });
         stepCostsProvider?.refresh();
     },
     // Point the Step Costs pane at a line (what a stop would do).

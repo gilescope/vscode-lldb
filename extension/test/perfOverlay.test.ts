@@ -10,7 +10,13 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 
 interface PerfTestApi {
-    setStepCost(fsPath: string, line: number, inst: number, hits?: number): void;
+    setStepCost(
+        fsPath: string,
+        line: number,
+        inst: number,
+        hits?: number,
+        extra?: { cycles?: number; ipc?: number | null; diagnosis?: { emoji: string; label: string; summary: string; hint: string } | null; memDelta?: number | null },
+    ): void;
     setFocus(fsPath: string, line: number): void;
     paneRows(): string[];
     clear(): void;
@@ -79,15 +85,33 @@ describe('step costs pane (focus-line readout)', () => {
     });
     after(() => perf?.clear());
 
-    it('shows the exact detail for the focused line', () => {
+    it('shows the per-step metrics (categorisation, instructions, cycles, IPC, memory Δ)', () => {
         perf.clear();
-        perf.setStepCost(f, 26, 3_777_494, 2);
+        perf.setStepCost(f, 26, 3_777_494, 1, {
+            cycles: 5_000_000,
+            ipc: 1.33,
+            diagnosis: { emoji: '🔥', label: 'high-ipc', summary: 'busy', hint: '' },
+            memDelta: 1024 * 1024, // +1 MB
+        });
         perf.setFocus(f, 26);
         const rows = perf.paneRows().join('\n');
-        assert.ok(/:26/.test(rows), `header missing line; rows:\n${rows}`);
-        assert.ok(rows.includes('instructions | 3,777,494'), `missing instructions row; rows:\n${rows}`);
-        assert.ok(rows.includes('steps over line | 2'), `missing steps row; rows:\n${rows}`);
-        assert.ok(rows.includes('avg/step | 1,888,747'), `missing avg row; rows:\n${rows}`);
+        assert.ok(/:26/.test(rows), `header line; rows:\n${rows}`);
+        assert.ok(rows.includes('high-ipc'), `categorisation in header; rows:\n${rows}`);
+        assert.ok(rows.includes('instructions | 3,777,494'), `instructions; rows:\n${rows}`);
+        assert.ok(rows.includes('cycles | 5,000,000'), `cycles; rows:\n${rows}`);
+        assert.ok(rows.includes('IPC | 1.33'), `IPC; rows:\n${rows}`);
+        assert.ok(rows.includes('memory Δ | +1.0 MB'), `memory Δ; rows:\n${rows}`);
+        assert.ok(!rows.includes('steps over line') && !rows.includes('avg/step'), `dropped rows still present; rows:\n${rows}`);
+    });
+
+    it('shows — for PMU-only metrics on the rusage (macOS) path', () => {
+        perf.clear();
+        perf.setStepCost(f, 30, 90_000); // no cycles/ipc → unavailable
+        perf.setFocus(f, 30);
+        const rows = perf.paneRows().join('\n');
+        assert.ok(rows.includes('instructions | 90,000'), `instructions; rows:\n${rows}`);
+        assert.ok(rows.includes('cycles | —'), `cycles dash; rows:\n${rows}`);
+        assert.ok(rows.includes('IPC | —'), `IPC dash; rows:\n${rows}`);
     });
 
     it('says so when the focused line has no recorded cost', () => {
