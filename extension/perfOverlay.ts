@@ -576,7 +576,12 @@ function repaintStepCosts(fsPath: string): void {
             // Cost cells span the first character so the hover has a target
             // (a zero-width range / gutter has none); blank cells stay
             // zero-width to avoid stealing hovers on un-stepped lines.
-            range: cost ? new Range(ln, 0, ln, 1) : new Range(ln, 0, ln, 0),
+            // Zero-width point at col 0: the column is purely visual. NO
+            // hoverMessage — a decoration hover here competes in the same
+            // widget as the debug value hover and, after a few hovers, was
+            // leaving the variable hover empty. Exact counts live in the
+            // Step Costs sidebar instead.
+            range: new Range(ln, 0, ln, 0),
             renderOptions: {
                 before: {
                     // emoji + right-aligned magnitude, e.g. "🔴 3.8M".
@@ -584,25 +589,14 @@ function repaintStepCosts(fsPath: string): void {
                     color: dim,
                     width: '10ch',
                     margin: '0 1ch 0 0',
-                    // Background is now a faint tint of the line's heat colour
-                    // (was flat grey); empty cells keep a neutral band.
+                    // Background is a faint tint of the line's heat colour;
+                    // empty cells keep a neutral band.
                     backgroundColor: cost ? tint(tierHex, 0.18) : 'rgba(127,127,127,0.05)',
                     textDecoration:
                         `none; border-left: 3px solid ${tierHex}; padding-left: 5px; box-sizing: border-box;`,
                 },
             },
         };
-        // The hover fires over the col-0 column cell (not the shifted code),
-        // so the exact count lives here without colliding with debug/RA hovers.
-        if (cost) {
-            cell.hoverMessage =
-                `**BugStalker step cost**\n\n` +
-                `- instructions: ${cost.inst.toLocaleString()}\n` +
-                `- steps over line: ${cost.hits}` +
-                (cost.hits > 1
-                    ? `\n- avg/step: ${Math.round(cost.inst / cost.hits).toLocaleString()}`
-                    : '');
-        }
         opts.push(cell);
     }
     editor.setDecorations(active.stepColumn, opts);
