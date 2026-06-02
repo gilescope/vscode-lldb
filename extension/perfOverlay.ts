@@ -11,10 +11,11 @@
 // the DAP session at `src/dap/yadap/session/perf.rs`.
 
 import {
-    commands, debug, window, Uri,
+    commands, debug, languages, window, Uri,
     DecorationOptions, DebugAdapterTracker, DebugAdapterTrackerFactory,
     DebugSession, Event, EventEmitter, ExtensionContext,
-    OverviewRulerLane, Range, StatusBarAlignment, StatusBarItem,
+    Hover, HoverProvider, MarkdownString, OverviewRulerLane, Position,
+    ProviderResult, Range, StatusBarAlignment, StatusBarItem, TextDocument,
     TextEditor, TextEditorDecorationType,
     ThemeColor, ThemeIcon, TreeDataProvider, TreeItem, TreeItemCollapsibleState,
 } from 'vscode';
@@ -127,8 +128,6 @@ interface SessionState {
     stepColumn: TextEditorDecorationType;
     // Location at the previous stop = the line the *next* step executes.
     prevStop?: { fsPath: string; line: number };
-    // fsPath → (1-based line → accumulated cost). Reset per session.
-    stepCosts: Map<string, Map<number, StepCost>>;
     // Undo stack: one entry per forward step, so a reverse step (stepBack)
     // can subtract exactly what the matching forward step added rather than
     // double-counting when you re-walk a line.
@@ -143,6 +142,11 @@ interface SessionState {
 }
 
 let active: SessionState | undefined;
+
+// Per-line step costs — fsPath → (1-based line → accumulated cost). Lives
+// at module scope (not on `active`) so the HoverProvider and the test hook
+// can read/write it without a live debug session. Cleared on each bind.
+const stepCosts = new Map<string, Map<number, StepCost>>();
 
 export function registerPerfOverlay(ctx: ExtensionContext): void {
     const factory: DebugAdapterTrackerFactory = {
@@ -159,6 +163,13 @@ export function registerPerfOverlay(ctx: ExtensionContext): void {
     stepCostsProvider = new StepCostsProvider();
     ctx.subscriptions.push(window.registerTreeDataProvider('bugstalker.stepCosts', stepCostsProvider));
     ctx.subscriptions.push(commands.registerCommand('bugstalker.clearStepCosts', clearStepCosts));
+
+    // Hover with the exact per-line count. A HoverProvider (vs a decoration
+    // hoverMessage) is what VS Code *merges* with the debug value hover and
+    // what `vscode.executeHoverProvider` can read back for tests.
+    ctx.subscriptions.push(
+        languages.registerHoverProvider({ scheme: 'file', language: 'rust' }, new StepCostHoverProvider()),
+    );
 
     ctx.subscriptions.push(debug.onDidStartDebugSession(onSessionStart));
     ctx.subscriptions.push(debug.onDidTerminateDebugSession(onSessionEnd));
@@ -212,10 +223,10 @@ function bindTo(session: DebugSession): void {
         // Narrow `before`-column for per-step cost (file-blame style).
         // Empty handle — all styling is set per-line in renderOptions.before.
         stepColumn: window.createTextEditorDecorationType({}),
-        stepCosts: new Map(),
         stepHistory: [],
         stepCostsEnabled: true,
     };
+    stepCosts.clear(); // fresh costs for the new session
     const name = (session.configuration as { name?: string })?.name ?? session.id;
     output.appendLine(`[perf] overlay → session "${name}" (${session.type})`);
     stepCostsProvider?.refresh(); // fresh (empty) costs for the new session
@@ -500,11 +511,10 @@ async function attributeStep(
 }
 
 function recordStepCost(fsPath: string, line: number, inst: number): void {
-    if (!active) return;
-    let byLine = active.stepCosts.get(fsPath);
+    let byLine = stepCosts.get(fsPath);
     if (!byLine) {
         byLine = new Map();
-        active.stepCosts.set(fsPath, byLine);
+        stepCosts.set(fsPath, byLine);
     }
     const cur = byLine.get(line);
     if (cur) {
@@ -517,8 +527,7 @@ function recordStepCost(fsPath: string, line: number, inst: number): void {
 
 // Inverse of recordStepCost — used when a reverse step undoes a forward one.
 function unrecordStepCost(fsPath: string, line: number, inst: number): void {
-    if (!active) return;
-    const byLine = active.stepCosts.get(fsPath);
+    const byLine = stepCosts.get(fsPath);
     const cur = byLine?.get(line);
     if (!cur) return;
     cur.inst -= inst;
@@ -558,7 +567,7 @@ function repaintStepCosts(fsPath: string): void {
     if (!active) return;
     const editor = window.visibleTextEditors.find((e) => e.document.uri.fsPath === fsPath);
     if (!editor) return;
-    const byLine = active.stepCostsEnabled ? active.stepCosts.get(fsPath) : undefined;
+    const byLine = active.stepCostsEnabled ? stepCosts.get(fsPath) : undefined;
     if (!byLine || byLine.size === 0) {
         editor.setDecorations(active.stepColumn, []);
         return;
@@ -617,7 +626,7 @@ function togglePerfStepCosts(): void {
 
 function clearStepCosts(): void {
     if (!active) return;
-    active.stepCosts.clear();
+    stepCosts.clear();
     for (const editor of window.visibleTextEditors) {
         repaintStepCosts(editor.document.uri.fsPath);
     }
@@ -649,7 +658,7 @@ class StepCostsProvider implements TreeDataProvider<StepCostNode> {
         if (!active || !active.stepCostsEnabled) return [];
         const rows: Array<{ fsPath: string; line: number; cost: StepCost }> = [];
         let max = 0;
-        for (const [fsPath, byLine] of active.stepCosts) {
+        for (const [fsPath, byLine] of stepCosts) {
             for (const [line, cost] of byLine) {
                 rows.push({ fsPath, line, cost });
                 if (cost.inst > max) max = cost.inst;
@@ -762,6 +771,44 @@ function formatDurationNs(ns: number): string {
 function formatErr(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
 }
+
+// Exact per-line count on hover. Unlike a decoration hoverMessage (which
+// competed with the debug value hover and left it empty), a HoverProvider
+// returns a scoped result VS Code merges — and `executeHoverProvider` can
+// read it back, so it's mechanically testable.
+class StepCostHoverProvider implements HoverProvider {
+    provideHover(document: TextDocument, position: Position): ProviderResult<Hover> {
+        if (active && !active.stepCostsEnabled) return undefined; // respect the toggle in-session
+        const cost = stepCosts.get(document.uri.fsPath)?.get(position.line + 1);
+        if (!cost) return undefined;
+        const md = new MarkdownString();
+        md.appendMarkdown(`**BugStalker step cost**\n\n`);
+        md.appendMarkdown(`- instructions: ${cost.inst.toLocaleString()}\n`);
+        md.appendMarkdown(`- steps over line: ${cost.hits}`);
+        if (cost.hits > 1) {
+            md.appendMarkdown(`\n- avg/step: ${Math.round(cost.inst / cost.hits).toLocaleString()}`);
+        }
+        return new Hover(md);
+    }
+}
+
+// Test hook returned from activate() — lets the @vscode/test-electron suite
+// inject step costs and query the HoverProvider without a live debug session.
+export const _perfTest = {
+    setStepCost(fsPath: string, line: number, inst: number, hits = 1): void {
+        let byLine = stepCosts.get(fsPath);
+        if (!byLine) {
+            byLine = new Map();
+            stepCosts.set(fsPath, byLine);
+        }
+        byLine.set(line, { inst, hits });
+        stepCostsProvider?.refresh();
+    },
+    clear(): void {
+        stepCosts.clear();
+        stepCostsProvider?.refresh();
+    },
+};
 
 export const __test = {
     pickTier,

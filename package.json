@@ -30,6 +30,10 @@
     "devDependencies": {
         "@types/vscode": "^1.74.0",
         "@types/node": "^18.0.0",
+        "@types/mocha": "^10.0.0",
+        "@vscode/test-cli": "^0.0.10",
+        "@vscode/test-electron": "^2.4.1",
+        "mocha": "^10.7.0",
         "ts-loader": "^9.4.0",
         "typescript": "^5.0.0",
         "webpack": "^5.88.0",
@@ -39,7 +43,10 @@
         "vscode:prepublish": "npm run -S build",
         "build": "webpack --mode production",
         "watch": "webpack --mode development --watch",
-        "typecheck": "tsc --noEmit -p extension/tsconfig.json"
+        "typecheck": "tsc --noEmit -p extension/tsconfig.json",
+        "compile-tests": "tsc -p extension/test/tsconfig.json",
+        "pretest": "npm run build && npm run compile-tests",
+        "test": "vscode-test"
     },
     "main": "out/extension.js",
     "activationEvents": [
