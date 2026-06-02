@@ -179,6 +179,19 @@ export function registerPerfOverlay(ctx: ExtensionContext): void {
 
     ctx.subscriptions.push(debug.onDidStartDebugSession(onSessionStart));
     ctx.subscriptions.push(debug.onDidTerminateDebugSession(onSessionEnd));
+    // The Step Costs pane reports on the line under the cursor. Following
+    // the cursor (rather than the debugger stop) lets you inspect *any*
+    // line's cost by clicking it, and sidesteps the step-attribution timing
+    // (cost lands on the line you left, not the one you land on). A debug
+    // stop moves the cursor too, so the pane still tracks stepping for free.
+    ctx.subscriptions.push(window.onDidChangeTextEditorSelection((e) => {
+        if (!active || !rustEditor(e.textEditor)) return;
+        const line = e.selections[0]?.active.line;
+        if (line == null) return;
+        focusLine = { fsPath: e.textEditor.document.uri.fsPath, line: line + 1 };
+        stepCostsProvider?.refresh();
+    }));
+
     ctx.subscriptions.push(window.onDidChangeActiveTextEditor(() => {
         // When the user opens a previously-unrequested file, fetch its
         // overlay; otherwise repaint from cache.
@@ -494,11 +507,6 @@ async function attributeStep(
     const here = threadId != null ? await topFrame(threadId) : undefined;
     if (!active) return; // overtaken / torn down during the await
 
-    // The pane reports on `focusLine`: by default the line we're stopped at,
-    // but a forward step points it at the line just executed so you see what
-    // that step cost (the cost lands on prevStop, not on `here`).
-    focusLine = here;
-
     if (cmd === 'stepBack') {
         // Reverse step: undo the matching forward step's cost instead of
         // adding, so re-walking a line doesn't double-count.
@@ -516,10 +524,12 @@ async function attributeStep(
         recordStepCost(prev.fsPath, prev.line, inst);
         active.stepHistory.push({ fsPath: prev.fsPath, line: prev.line, inst });
         repaintStepCosts(prev.fsPath);
-        focusLine = { fsPath: prev.fsPath, line: prev.line };
     }
     active.prevStop = here;
-    stepCostsProvider?.refresh(); // pane follows focusLine on every stop
+    // `focusLine` is cursor-driven (see onDidChangeTextEditorSelection), not
+    // set here — but refresh so the pane reflects a cost that just changed on
+    // the line the cursor already sits on.
+    stepCostsProvider?.refresh();
 }
 
 function recordStepCost(fsPath: string, line: number, inst: number): void {
