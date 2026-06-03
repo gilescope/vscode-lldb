@@ -85,23 +85,31 @@ describe('step costs pane (focus-line readout)', () => {
     });
     after(() => perf?.clear());
 
-    it('shows the per-step metrics (categorisation, instructions, cycles, IPC, memory Δ)', () => {
+    it('shows per-step metrics with categorisation (+ full detail) last', () => {
         perf.clear();
         perf.setStepCost(f, 26, 3_777_494, 1, {
             cycles: 5_000_000,
             ipc: 1.33,
-            diagnosis: { emoji: '🔥', label: 'high-ipc', summary: 'busy', hint: '' },
+            diagnosis: { emoji: '💤', label: 'mostly-waiting', summary: 'CPU active for 0% of wall time', hint: 'blocked on I/O, sleep, lock contention, or syscall' },
             memDelta: 1024 * 1024, // +1 MB
         });
         perf.setFocus(f, 26);
-        const rows = perf.paneRows().join('\n');
+        const arr = perf.paneRows();
+        const rows = arr.join('\n');
         assert.ok(/:26/.test(rows), `header line; rows:\n${rows}`);
-        assert.ok(rows.includes('high-ipc'), `categorisation in header; rows:\n${rows}`);
         assert.ok(rows.includes('instructions | 3,777,494'), `instructions; rows:\n${rows}`);
         assert.ok(rows.includes('cycles | 5,000,000'), `cycles; rows:\n${rows}`);
         assert.ok(rows.includes('IPC | 1.33'), `IPC; rows:\n${rows}`);
         assert.ok(rows.includes('memory Δ | +1.0 MB'), `memory Δ; rows:\n${rows}`);
-        assert.ok(!rows.includes('steps over line') && !rows.includes('avg/step'), `dropped rows still present; rows:\n${rows}`);
+        // categorisation + full detail (summary + hint) present...
+        assert.ok(rows.includes('mostly-waiting'), `categorisation; rows:\n${rows}`);
+        assert.ok(rows.includes('CPU active for 0% of wall time'), `summary detail; rows:\n${rows}`);
+        assert.ok(rows.includes('blocked on I/O'), `hint detail; rows:\n${rows}`);
+        // ...and it's LAST (below memory Δ)
+        const memIdx = arr.findIndex((r) => r.includes('memory Δ'));
+        const catIdx = arr.findIndex((r) => r.includes('mostly-waiting'));
+        assert.ok(memIdx >= 0 && catIdx > memIdx, `categorisation should sit below memory Δ; rows:\n${rows}`);
+        assert.ok(!rows.includes('steps over line') && !rows.includes('avg/step'), `dropped rows present; rows:\n${rows}`);
     });
 
     it('shows — for PMU-only metrics on the rusage (macOS) path', () => {

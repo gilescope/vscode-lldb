@@ -684,6 +684,7 @@ function clearStepCosts(): void {
 type PaneNode =
     | { kind: 'header'; fsPath: string; line: number; cost?: StepCost; tier: number }
     | { kind: 'metric'; label: string; value: string }
+    | { kind: 'diag'; emoji: string; label: string; summary: string; hint: string }
     | { kind: 'info'; text: string };
 
 // Index-aligned with HEAT_TIERS — built-in chart ThemeColors so the dot
@@ -720,13 +721,21 @@ class StepCostsProvider implements TreeDataProvider<PaneNode> {
         // Last step's metrics ("since last step"). cycles/IPC are PMU-only,
         // so '—' on macOS (no kperf entitlement); instructions + memory Δ
         // come from the rusage path and are real there.
-        return [
+        const rows: PaneNode[] = [
             header,
             { kind: 'metric', label: 'instructions', value: cost.lastInst.toLocaleString() },
             { kind: 'metric', label: 'cycles', value: cost.lastCycles > 0 ? cost.lastCycles.toLocaleString() : '—' },
             { kind: 'metric', label: 'IPC', value: cost.lastIpc != null && cost.lastIpc > 0 ? cost.lastIpc.toFixed(2) : '—' },
             { kind: 'metric', label: 'memory Δ', value: cost.lastMemDelta != null ? formatBytesSigned(cost.lastMemDelta) : '—' },
         ];
+        // Categorisation last, with the full "how to improve" detail.
+        const d = cost.lastDiagnosis;
+        if (d) {
+            rows.push({ kind: 'diag', emoji: d.emoji, label: d.label, summary: d.summary, hint: d.hint });
+            if (d.summary) rows.push({ kind: 'info', text: d.summary });
+            if (d.hint) rows.push({ kind: 'info', text: `↳ ${d.hint}` });
+        }
+        return rows;
     }
 
     getTreeItem(node: PaneNode): TreeItem {
@@ -740,11 +749,15 @@ class StepCostsProvider implements TreeDataProvider<PaneNode> {
             item.description = node.value;
             return item;
         }
-        // header — line + the step's categorisation as the at-a-glance summary
+        if (node.kind === 'diag') {
+            // Categorisation header row: emoji + label, full detail on hover.
+            const item = new TreeItem(`${node.emoji} ${node.label}`, TreeItemCollapsibleState.None);
+            item.tooltip = `${node.summary}\n\n${node.hint}`;
+            return item;
+        }
+        // header — line + heat dot. Categorisation now lives at the bottom.
         const item = new TreeItem(`${shortPath(node.fsPath)}:${node.line}`, TreeItemCollapsibleState.None);
-        const diag = node.cost?.lastDiagnosis;
-        item.description = diag ? `${diag.emoji} ${diag.label}` : node.cost ? '' : '—';
-        if (diag) item.tooltip = `${diag.emoji} ${diag.label}: ${diag.summary}\n${diag.hint}`;
+        item.description = node.cost ? '' : '—';
         item.iconPath = new ThemeIcon('circle-filled', new ThemeColor(TIER_CHART_COLORS[node.tier]));
         item.command = {
             command: 'vscode.open',
