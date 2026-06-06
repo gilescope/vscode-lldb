@@ -242,6 +242,12 @@
                     },
                     "default": {},
                     "scope": "resource"
+                },
+                "bugstalker.showAsmViewOnStart": {
+                    "description": "Automatically open the Source+ASM view when a BugStalker debug session starts.",
+                    "type": "boolean",
+                    "default": true,
+                    "scope": "resource"
                 }
             }
         },

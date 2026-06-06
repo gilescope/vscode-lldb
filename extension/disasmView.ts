@@ -66,6 +66,17 @@ export function registerDisasmView(ctx: ExtensionContext): void {
         commands.registerCommand('bugstalker.openDisasmView', openDisasmView),
     );
 
+    // Auto-open when a debug session starts (respects bugstalker.showAsmViewOnStart).
+    ctx.subscriptions.push(
+        debug.onDidStartDebugSession((session) => {
+            if (session.type !== 'bugstalker' && session.type !== 'lldb') return;
+            const cfg = workspace.getConfiguration('bugstalker');
+            if (cfg.get<boolean>('showAsmViewOnStart', true)) {
+                ensurePanelOpen();
+            }
+        }),
+    );
+
     // Cursor in the source editor → scroll webview to matching instructions.
     ctx.subscriptions.push(
         window.onDidChangeTextEditorSelection((e) => {
@@ -93,6 +104,23 @@ export function registerDisasmView(ctx: ExtensionContext): void {
     }
 }
 
+// ── Panel lifecycle ────────────────────────────────────────────────────────
+
+function ensurePanelOpen(): void {
+    if (panel) {
+        panel.reveal(ViewColumn.Two, true);
+        return;
+    }
+    panel = window.createWebviewPanel(
+        'bugstalker.disasm',
+        'Source + ASM',
+        { viewColumn: ViewColumn.Two, preserveFocus: true },
+        { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [], enableFindWidget: true },
+    );
+    panel.webview.html = webviewHtml();
+    panel.onDidDispose(() => { panel = undefined; });
+}
+
 // ── Open command ───────────────────────────────────────────────────────────
 
 async function openDisasmView(): Promise<void> {
@@ -106,19 +134,7 @@ async function openDisasmView(): Promise<void> {
         return;
     }
     currentSourcePath = srcEditor.document.uri.fsPath;
-
-    if (panel) {
-        panel.reveal(ViewColumn.Two, true);
-    } else {
-        panel = window.createWebviewPanel(
-            'bugstalker.disasm',
-            'Source + ASM',
-            { viewColumn: ViewColumn.Two, preserveFocus: true },
-            { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [], enableFindWidget: true },
-        );
-        panel.webview.html = webviewHtml();
-        panel.onDidDispose(() => { panel = undefined; });
-    }
+    ensurePanelOpen();
     output.appendLine(`[disasm] opened for ${currentSourcePath}`);
 }
 
@@ -187,6 +203,16 @@ async function onStop(session: DebugSession, threadId: number | undefined): Prom
     // Propagate source line numbers from the first instruction of each block.
     const instructions = propagateLines(rawInstructions, currentPc);
 
+    // Debug: show raw DWARF annotations and propagated srcLines so we can
+    // spot-check the line-number alignment.  Remove once alignment is verified.
+    const annotated = rawInstructions
+        .filter(i => i.line != null)
+        .map(i => `  addr ${normAddrSafe(i.address)}  DWARF→${i.line}`);
+    const propagated = instructions
+        .map(i => `  addr ${i.addr}  src=${i.srcLine}  ${i.text.split(/\s/)[0]}`);
+    output.appendLine(`[disasm debug] DWARF annotations:\n${annotated.join('\n')}`);
+    output.appendLine(`[disasm debug] propagated srcLines:\n${propagated.join('\n')}`);
+
     const msg: WebviewUpdate = { type: 'update', instructions, currentPc, fnName };
     void panel.webview.postMessage(msg);
 }
@@ -205,6 +231,10 @@ function propagateLines(raw: DapInstruction[], currentPc: string): WvInstruction
 
 function normAddr(hex: string): string {
     return BigInt(hex).toString(16);
+}
+
+function normAddrSafe(hex: string): string {
+    try { return normAddr(hex); } catch { return hex; }
 }
 
 function formatErr(err: unknown): string {
