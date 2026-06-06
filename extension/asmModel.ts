@@ -148,6 +148,15 @@ export interface PortPressure {
     nInstr: number;
     /** Throughput floor in cycles for the region (optimistic; latency-blind). */
     minCycles: number;
+    /**
+     * Best achievable IPC for *this instruction mix* = nInstr / minCycles,
+     * capped at the core's integer-port peak. The key Tier-3 number: it's the
+     * ceiling the *code* allows, not the core's all-ALU peak. Divide-heavy code
+     * has a low mix peak no matter how well scheduled — so measured-IPC ÷ this
+     * tells you whether the win is the algorithm (near the mix peak) or the
+     * stalls (far below it). Static, deterministic.
+     */
+    peakIpc: number;
     /** The port group that sets the floor. */
     bottleneck: PortGroup;
     bottleneckLabel: string;
@@ -189,13 +198,69 @@ export function portPressure(texts: string[]): PortPressure {
     }
 
     const dataOps = simd + scalarData;
+    const nInstr = texts.filter(Boolean).length;
+    // Core integer-port count is the absolute IPC ceiling (all-ALU peak); the
+    // mix peak can't exceed it. minCycles==0 (all eliminated) ⇒ ceiling.
+    const corePeak = GROUPS.int.throughput;
+    const peakIpc = minCycles > 0 ? Math.min(corePeak, nInstr / minCycles) : corePeak;
     return {
-        nInstr: texts.filter(Boolean).length,
+        nInstr,
         minCycles,
+        peakIpc,
         bottleneck,
         bottleneckLabel: GROUPS[bottleneck].label,
         demand,
         simdShare: dataOps > 0 ? simd / dataOps : null,
         stackTraffic,
+    };
+}
+
+// ── Measured vs floor (Tier 3) ───────────────────────────────────────────────
+
+export interface MeasuredEfficiency {
+    /** measured CPI ÷ static floor CPI. ~1 = at the mix ceiling; higher = stalls. */
+    ratio: number;
+    /** Where the headroom is: change the code, or chase the stalls. */
+    bound: 'algorithm' | 'mixed' | 'stalls';
+    /** One-line verdict for display. */
+    verdict: string;
+}
+
+/**
+ * Combine the static throughput floor with run-regime measured counters into a
+ * "how far above the floor are we" ratio and an algorithm-vs-stalls verdict.
+ * Both inputs are per-instruction (CPI), so it's iteration-count-independent —
+ * but it assumes the executed mix ≈ the displayed function's static mix, so it's
+ * APPROXIMATE (the caller must already have gated on the run regime). Returns
+ * `undefined` when the inputs can't form a ratio.
+ */
+export function measuredEfficiency(
+    p: PortPressure,
+    runInstructions: number,
+    runCycles: number,
+): MeasuredEfficiency | undefined {
+    if (runInstructions <= 0 || runCycles <= 0 || p.minCycles <= 0 || p.nInstr <= 0) {
+        return undefined;
+    }
+    const floorCpi = p.minCycles / p.nInstr;
+    const measuredCpi = runCycles / runInstructions;
+    // ratio < 1 means the executed hot path is cheaper than the whole displayed
+    // function's static mix — treat as "at the ceiling" rather than report <1×.
+    const ratio = Math.max(1, measuredCpi / floorCpi);
+
+    if (ratio <= 1.3) {
+        return {
+            ratio,
+            bound: 'algorithm',
+            verdict: `at the throughput ceiling for this instruction mix — to go faster, do fewer ${p.bottleneckLabel} ops (algorithm), scheduling won't help`,
+        };
+    }
+    if (ratio <= 2.5) {
+        return { ratio, bound: 'mixed', verdict: 'some headroom below this mix’s ceiling — partial stalls' };
+    }
+    return {
+        ratio,
+        bound: 'stalls',
+        verdict: 'well below this mix’s ceiling — stalls (memory / dependencies / mispredicts); hardware counters needed to pinpoint',
     };
 }

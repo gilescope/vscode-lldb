@@ -13,7 +13,8 @@ import {
 } from 'vscode';
 import { output } from './main';
 import { describeMnemonic, operandRegisters } from './asmDescribe';
-import { lineNotes, portPressure, type EfficiencyNote, type PortPressure } from './asmModel';
+import { lineNotes, portPressure, measuredEfficiency, type EfficiencyNote, type PortPressure, type MeasuredEfficiency } from './asmModel';
+import { RUN_REGIME_MIN_INST } from './perfGauge';
 
 // ── DAP wire types ─────────────────────────────────────────────────────────
 
@@ -57,6 +58,15 @@ interface WebviewUpdate {
     registers: Record<string, string>;
     // Static port-pressure summary for the whole disassembled function.
     pressure: PortPressure;
+    // Measured-vs-floor verdict (Tier 3), only when the last window was a run
+    // (enough instructions for cycles to be trustworthy). Undefined otherwise.
+    efficiency?: MeasuredEfficiency;
+}
+
+// The bits of the perf `stopped`-event body the ASM view consumes.
+interface BsPerf {
+    runCycles?: number;
+    runInstructions?: number | null;
 }
 
 interface WebviewCursor {
@@ -106,9 +116,9 @@ export function registerDisasmView(ctx: ExtensionContext): void {
     const factory: DebugAdapterTrackerFactory = {
         createDebugAdapterTracker(session: DebugSession): DebugAdapterTracker {
             return {
-                onDidSendMessage(m: { type?: string; event?: string; body?: { threadId?: number } }) {
+                onDidSendMessage(m: { type?: string; event?: string; body?: { threadId?: number; bs_perf?: BsPerf } }) {
                     if (m.type !== 'event' || m.event !== 'stopped') return;
-                    void onStop(session, m.body?.threadId);
+                    void onStop(session, m.body?.threadId, m.body?.bs_perf);
                 },
             };
         },
@@ -166,7 +176,7 @@ async function openDisasmView(): Promise<void> {
 
 // ── Stop handler ───────────────────────────────────────────────────────────
 
-async function onStop(session: DebugSession, threadId: number | undefined): Promise<void> {
+async function onStop(session: DebugSession, threadId: number | undefined, perf?: BsPerf): Promise<void> {
     if (!panel) return;
     if (session.type !== 'bugstalker' && session.type !== 'lldb') return;
     lastSession = session;
@@ -255,7 +265,16 @@ async function onStop(session: DebugSession, threadId: number | undefined): Prom
     // Static port-pressure summary for the whole function (deterministic, no PMU).
     const pressure = portPressure(instructions.map((i) => i.text));
 
-    const msg: WebviewUpdate = { type: 'update', instructions, currentPc, fnName, registers, pressure };
+    // Tier 3: measured-vs-floor, only in the run regime (enough instructions
+    // that the trap-corrected cycle count is trustworthy — same gate as the IPC
+    // gauge). Approximate: assumes the run was dominated by this function.
+    let efficiency: MeasuredEfficiency | undefined;
+    const runInst = perf?.runInstructions ?? 0;
+    if (perf && perf.runCycles && perf.runCycles > 0 && runInst >= RUN_REGIME_MIN_INST) {
+        efficiency = measuredEfficiency(pressure, runInst, perf.runCycles);
+    }
+
+    const msg: WebviewUpdate = { type: 'update', instructions, currentPc, fnName, registers, pressure, efficiency };
     void panel.webview.postMessage(msg);
 }
 
@@ -459,7 +478,7 @@ function webviewHtml(): string {
       registers = data.registers || {};
       currentPc = data.currentPc;
       document.getElementById('fn-name').textContent = data.fnName || '(function)';
-      renderPressure(data.pressure);
+      renderPressure(data.pressure, data.efficiency);
       render(data.instructions, data.currentPc);
       // Scroll to the PC row after a render.
       scrollToRow(document.querySelector('.current-pc'));
@@ -535,13 +554,13 @@ function webviewHtml(): string {
     applyCursorLine();
   }
 
-  function renderPressure(p) {
+  function renderPressure(p, eff) {
     const bar = document.getElementById('pressure');
     if (!p || !p.nInstr) { bar.textContent = ''; return; }
     while (bar.firstChild) bar.removeChild(bar.firstChild);
-    // "⚙ throughput floor ≈ 4.0 cyc · bound: integer divide · 0% SIMD"
-    bar.appendChild(document.createTextNode('⚙ floor ≈ '));
-    bar.appendChild(document.createTextNode(p.minCycles.toFixed(1) + ' cyc'));
+    // "⚙ best ≈ 0.5 IPC · bound: integer divide · 0% SIMD · measured 3.2× floor"
+    bar.appendChild(document.createTextNode('⚙ best ≈ '));
+    bar.appendChild(document.createTextNode(p.peakIpc.toFixed(1) + ' IPC'));
     bar.appendChild(document.createTextNode(' · bound: '));
     const b = document.createElement('span');
     b.className = 'bottleneck';
@@ -556,9 +575,19 @@ function webviewHtml(): string {
       s.textContent = ' · ' + p.stackTraffic + ' stack op' + (p.stackTraffic === 1 ? '' : 's');
       bar.appendChild(s);
     }
-    bar.title = 'Static throughput floor from the Firestorm port model — optimistic '
-      + '(ignores dependency-chain latency). Names the bottleneck execution port, '
-      + 'not a cycle-accurate prediction.';
+    let title = 'Static throughput model (Firestorm port table) — optimistic, '
+      + 'ignores dependency-chain latency. "best" is the highest IPC this exact '
+      + 'instruction mix allows; the bound is the execution port that caps it.';
+    // Tier 3: measured-vs-floor (run regime only).
+    if (eff) {
+      bar.appendChild(document.createTextNode(' · '));
+      const e = document.createElement('span');
+      e.className = eff.bound === 'stalls' ? 'warn' : 'bottleneck';
+      e.textContent = 'measured ' + eff.ratio.toFixed(1) + '× floor';
+      bar.appendChild(e);
+      title += '\n\nMeasured: ' + eff.verdict + ' (run-regime, approximate — assumes the run was dominated by this function).';
+    }
+    bar.title = title;
   }
 
   function applyCursorLine() {
