@@ -248,6 +248,13 @@
                     "type": "boolean",
                     "default": true,
                     "scope": "resource"
+                },
+                "bugstalker.buildMode": {
+                    "description": "Cargo build mode for the `cargo` block in launch configs. \"release\" builds with --release and preserves full debug info (CARGO_PROFILE_RELEASE_DEBUG=2), giving realistic performance numbers. \"debug\" uses the default unoptimised build. Overridden per-session by an explicit --release or --profile flag in the cargo args.",
+                    "type": "string",
+                    "enum": ["debug", "release"],
+                    "default": "release",
+                    "scope": "resource"
                 }
             }
         },
