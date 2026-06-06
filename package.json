@@ -62,7 +62,8 @@
         "onCommand:lldb.startEditContinue",
         "onCommand:lldb.stopEditContinue",
         "onCommand:lldb.stepIntoSkipLibs",
-        "onCommand:lldb.stepIntoAnyFrame"
+        "onCommand:lldb.stepIntoAnyFrame",
+        "onCommand:bugstalker.openDisasmView"
     ],
     "contributes": {
         "languages": [],
@@ -122,6 +123,12 @@
                 "command": "bugstalker.clearStepCosts",
                 "title": "Clear Step Costs",
                 "icon": "$(clear-all)"
+            },
+            {
+                "category": "BugStalker",
+                "command": "bugstalker.openDisasmView",
+                "title": "Open Source+ASM View",
+                "icon": "$(symbol-misc)"
             },
             {
                 "category": "BugStalker",

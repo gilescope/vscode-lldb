@@ -22,6 +22,7 @@ import { glyphLegendLines } from './novsc/varEnhancer';
 import { registerEditContinue } from './editContinue';
 import { registerPerfOverlay, _perfTest } from './perfOverlay';
 import { registerStepInto } from './stepInto';
+import { registerDisasmView } from './disasmView';
 
 const execFileAsync = promisify(execFile);
 
@@ -35,6 +36,7 @@ export function activate(context: ExtensionContext): { _perfTest: typeof _perfTe
     registerEditContinue(context);
     registerPerfOverlay(context);
     registerStepInto(context);
+    registerDisasmView(context);
 
     const adapterFactory: DebugAdapterDescriptorFactory = {
         createDebugAdapterDescriptor: (_session, _executable) => {
