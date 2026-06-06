@@ -161,11 +161,10 @@ async function onStop(session: DebugSession, threadId: number | undefined): Prom
     if (session.type !== 'bugstalker' && session.type !== 'lldb') return;
     lastSession = session;
     lastThreadId = threadId;
-    // Sync asm-focus state on every stop so the adapter knows immediately
-    // if the panel was already focused when the debugger first hit a breakpoint.
-    if (session.type === 'bugstalker' && panel) {
-        void session.customRequest('bs/setAsmFocus', { focused: panel.active });
-    }
+    // NB: do NOT re-sync asm focus here. The adapter's focus flag is owned by
+    // onDidChangeViewState alone. Re-reading panel.active on every stop races
+    // with preserveFocusHint and can clobber the flag to false mid-stepping,
+    // reverting the next F10/F11 to line-stepping.
 
     // Top frame.
     let frame: DapStackFrame | undefined;
