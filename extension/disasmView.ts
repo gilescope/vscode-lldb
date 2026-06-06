@@ -58,6 +58,8 @@ interface WebviewCursor {
 
 let panel: WebviewPanel | undefined;
 let currentSourcePath: string | undefined;
+let lastSession: DebugSession | undefined;
+let lastThreadId: number | undefined;
 
 // ── Registration ───────────────────────────────────────────────────────────
 
@@ -118,7 +120,8 @@ function ensurePanelOpen(): void {
         { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [], enableFindWidget: true },
     );
     panel.webview.html = webviewHtml();
-    panel.onDidDispose(() => { panel = undefined; });
+    const msgDisposable = panel.webview.onDidReceiveMessage(handleWebviewMessage);
+    panel.onDidDispose(() => { panel = undefined; msgDisposable.dispose(); });
 }
 
 // ── Open command ───────────────────────────────────────────────────────────
@@ -143,6 +146,8 @@ async function openDisasmView(): Promise<void> {
 async function onStop(session: DebugSession, threadId: number | undefined): Promise<void> {
     if (!panel) return;
     if (session.type !== 'bugstalker' && session.type !== 'lldb') return;
+    lastSession = session;
+    lastThreadId = threadId;
 
     // Top frame.
     let frame: DapStackFrame | undefined;
@@ -241,6 +246,21 @@ function formatErr(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
 }
 
+// ── Instruction-step relay ─────────────────────────────────────────────────
+// Called when the webview posts { type: 'stepi-next' | 'stepi-into' }.
+// Forwards as a standard DAP next/stepIn with granularity:'instruction',
+// the same request VS Code's Disassembly View sends when focused.
+
+function handleWebviewMessage(msg: { type: string }): void {
+    if (!lastSession) return;
+    const threadId = lastThreadId ?? 1;
+    if (msg.type === 'stepi-next') {
+        void lastSession.customRequest('next', { threadId, granularity: 'instruction' });
+    } else if (msg.type === 'stepi-into') {
+        void lastSession.customRequest('stepIn', { threadId, granularity: 'instruction' });
+    }
+}
+
 // ── Webview HTML ────────────────────────────────────────────────────────────
 
 function webviewHtml(): string {
@@ -334,7 +354,16 @@ function webviewHtml(): string {
 <div id="root"><p class="empty">Pause the debugger to see assembly.</p></div>
 <script>
 (function() {
+  const vscode = acquireVsCodeApi();
   let cursorLine = 0;
+
+  // F10 = step over at instruction level, F11 = step into at instruction level.
+  // Webview focus means VS Code's global debug keybindings don't fire, so we
+  // relay these manually as DAP next/stepIn with granularity:'instruction'.
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'F10') { e.preventDefault(); vscode.postMessage({ type: 'stepi-next' }); }
+    else if (e.key === 'F11') { e.preventDefault(); vscode.postMessage({ type: 'stepi-into' }); }
+  });
 
   window.addEventListener('message', ({ data }) => {
     if (data.type === 'update') {

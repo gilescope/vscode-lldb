@@ -633,8 +633,12 @@ function repaintStepCosts(fsPath: string): void {
             range: new Range(ln, 0, ln, 0),
             renderOptions: {
                 before: {
-                    // emoji + right-aligned magnitude, e.g. "🔴 3.8M".
-                    contentText: cost ? `${TIER_EMOJI[tier]} ${formatCompact(cost.inst).padStart(5)}` : '',
+                    // emoji + magnitude, e.g. "🔴 3.8M". The count is
+                    // right-aligned via CSS (`text-align: right` below) so the
+                    // digits flush to the column's right edge, against the code —
+                    // space-padding doesn't work here, the gutter font is
+                    // proportional.
+                    contentText: cost ? `${TIER_EMOJI[tier]} ${formatCompact(cost.inst)}` : '',
                     color: dim,
                     width: '10ch',
                     margin: '0 1ch 0 0',
@@ -642,7 +646,7 @@ function repaintStepCosts(fsPath: string): void {
                     // empty cells keep a neutral band.
                     backgroundColor: cost ? tint(tierHex, 0.18) : 'rgba(127,127,127,0.05)',
                     textDecoration:
-                        `none; border-left: 3px solid ${tierHex}; padding-left: 5px; box-sizing: border-box;`,
+                        `none; border-left: 3px solid ${tierHex}; padding-left: 5px; box-sizing: border-box; display: inline-block; text-align: right;`,
                 },
             },
         };
