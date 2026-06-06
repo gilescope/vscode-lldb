@@ -20,6 +20,7 @@ import {
     ThemeColor, ThemeIcon, TreeDataProvider, TreeItem, TreeItemCollapsibleState,
 } from 'vscode';
 import { output } from './main';
+import { ipcGauge } from './perfGauge';
 
 // Heat buckets keyed off the `heat` field returned by bs/perfOverlay,
 // which is samples-on-this-line / samples-on-hottest-line-in-this-source.
@@ -365,7 +366,12 @@ function updateStatus(summary: PerfStoppedSummary): void {
     if (haveInst && summary.runCycles > 0) {
         parts.push(`${formatScaled(summary.runInstructions!, 'inst')}`);
     }
-    if (summary.ipc && summary.ipc > 0) {
+    const gauge = ipcGauge(summary);
+    if (gauge) {
+        parts.push(gauge.short);
+    } else if (summary.ipc && summary.ipc > 0) {
+        // Sub-threshold: show the raw number but no /6.0 gauge — cycles aren't
+        // trustworthy enough at this window size to compare against peak.
         parts.push(`IPC ${summary.ipc.toFixed(2)}`);
     }
     parts.push(formatDurationNs(summary.runWallNs));
@@ -385,9 +391,11 @@ function updateStatus(summary: PerfStoppedSummary): void {
         (summary.runInstructions && summary.runInstructions > 0
             ? `  inst:    ${summary.runInstructions.toLocaleString()} retired\n`
             : '') +
-        (summary.ipc && summary.ipc > 0
-            ? `  IPC:     ${summary.ipc.toFixed(3)} (instructions / cycles)\n`
-            : '') +
+        (gauge
+            ? gauge.detail
+            : summary.ipc && summary.ipc > 0
+                ? `  IPC:     ${summary.ipc.toFixed(3)} (instructions / cycles; window too small to gauge vs peak)\n`
+                : '') +
         `  wall:    ${formatDurationNs(summary.runWallNs)}\n` +
         (summary.hot
             ? `  hot:     ${summary.hot.source}:${summary.hot.line} (${summary.hot.sampleCount} samples)\n`
