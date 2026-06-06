@@ -132,6 +132,16 @@
             },
             {
                 "category": "BugStalker",
+                "command": "bugstalker.stepiNext",
+                "title": "Step Over Instruction"
+            },
+            {
+                "category": "BugStalker",
+                "command": "bugstalker.stepiInto",
+                "title": "Step Into Instruction"
+            },
+            {
+                "category": "BugStalker",
                 "command": "lldb.stepIntoSkipLibs",
                 "title": "Step Into (Skip Libraries)"
             },
@@ -191,6 +201,16 @@
                 "command": "workbench.action.debug.stepBack",
                 "key": "shift+alt+up",
                 "when": "inDebugMode && (debugType == 'bugstalker' || debugType == 'lldb')"
+            },
+            {
+                "command": "bugstalker.stepiNext",
+                "key": "f10",
+                "when": "activeWebviewPanelId == 'bugstalker.disasm' && inDebugMode"
+            },
+            {
+                "command": "bugstalker.stepiInto",
+                "key": "f11",
+                "when": "activeWebviewPanelId == 'bugstalker.disasm' && inDebugMode"
             }
         ],
         "views": {
