@@ -122,7 +122,19 @@ function ensurePanelOpen(): void {
         { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [], enableFindWidget: true },
     );
     panel.webview.html = webviewHtml();
-    panel.onDidDispose(() => { panel = undefined; });
+    panel.onDidChangeViewState((e) => {
+        const session = debug.activeDebugSession;
+        if (session?.type === 'bugstalker') {
+            void session.customRequest('bs/setAsmFocus', { focused: e.webviewPanel.active });
+        }
+    });
+    panel.onDidDispose(() => {
+        const session = debug.activeDebugSession;
+        if (session?.type === 'bugstalker') {
+            void session.customRequest('bs/setAsmFocus', { focused: false });
+        }
+        panel = undefined;
+    });
 }
 
 // ── Open command ───────────────────────────────────────────────────────────
@@ -149,6 +161,11 @@ async function onStop(session: DebugSession, threadId: number | undefined): Prom
     if (session.type !== 'bugstalker' && session.type !== 'lldb') return;
     lastSession = session;
     lastThreadId = threadId;
+    // Sync asm-focus state on every stop so the adapter knows immediately
+    // if the panel was already focused when the debugger first hit a breakpoint.
+    if (session.type === 'bugstalker' && panel) {
+        void session.customRequest('bs/setAsmFocus', { focused: panel.active });
+    }
 
     // Top frame.
     let frame: DapStackFrame | undefined;
