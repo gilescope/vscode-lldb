@@ -131,7 +131,7 @@ const ARM64_MNEMONICS: Readonly<Record<string, string>> = {
 
 // Suffixes that don't change the *meaning* worth describing (size, vector
 // arrangement, set-flags variants we don't have a distinct entry for).
-function baseMnemonic(mnemonic: string): string {
+export function baseMnemonic(mnemonic: string): string {
     let m = mnemonic.toLowerCase();
     // Conditional branch b.<cond> → describe as a conditional branch.
     if (m.startsWith('b.')) return 'b.cond';

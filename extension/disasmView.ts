@@ -13,6 +13,7 @@ import {
 } from 'vscode';
 import { output } from './main';
 import { describeMnemonic, operandRegisters } from './asmDescribe';
+import { lineNotes, portPressure, type EfficiencyNote, type PortPressure } from './asmModel';
 
 // ── DAP wire types ─────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ interface WvInstruction {
     addr: string;       // normalised hex, for PC comparison
     desc?: string;      // plain-English description of the mnemonic (static)
     regs?: string[];    // operand register names (64-bit form), in source order
+    notes?: EfficiencyNote[]; // per-line efficiency flags (expensive ops)
 }
 
 interface WebviewUpdate {
@@ -53,6 +55,8 @@ interface WebviewUpdate {
     // Live GPR values at the current stop ({ x0: "0x…", … }), used to show the
     // current-PC instruction's operand values in its tooltip. Empty if absent.
     registers: Record<string, string>;
+    // Static port-pressure summary for the whole disassembled function.
+    pressure: PortPressure;
 }
 
 interface WebviewCursor {
@@ -248,7 +252,10 @@ async function onStop(session: DebugSession, threadId: number | undefined): Prom
     output.appendLine(`[disasm debug] DWARF annotations:\n${annotated.join('\n')}`);
     output.appendLine(`[disasm debug] propagated srcLines:\n${propagated.join('\n')}`);
 
-    const msg: WebviewUpdate = { type: 'update', instructions, currentPc, fnName, registers };
+    // Static port-pressure summary for the whole function (deterministic, no PMU).
+    const pressure = portPressure(instructions.map((i) => i.text));
+
+    const msg: WebviewUpdate = { type: 'update', instructions, currentPc, fnName, registers, pressure };
     void panel.webview.postMessage(msg);
 }
 
@@ -270,6 +277,7 @@ function propagateLines(raw: DapInstruction[], currentPc: string): WvInstruction
             addr,
             desc: describeMnemonic(mnemonic),
             regs: operandRegisters(text),
+            notes: lineNotes(text),
         };
     });
 }
@@ -337,6 +345,23 @@ function webviewHtml(): string {
     z-index: 1;
   }
 
+  /* Static efficiency summary bar (port-pressure floor + mix). */
+  #pressure {
+    position: sticky;
+    top: 1.5em;
+    padding: 2px 8px;
+    font-size: 0.8em;
+    color: var(--vscode-editorLineNumber-foreground, #858585);
+    background: var(--vscode-editor-background);
+    border-bottom: 1px solid var(--vscode-editorGroup-border, #333);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    z-index: 1;
+  }
+  #pressure .bottleneck { color: var(--vscode-debugTokenExpression-number, #b5cea8); }
+  #pressure .warn { color: #e0af68; }
+
   /* One row per instruction */
   .row {
     display: flex;
@@ -378,6 +403,9 @@ function webviewHtml(): string {
   }
   .row.current-pc::before { content: '►'; }
 
+  /* Expensive-op marker — a warn glyph after the operands. */
+  .warnflag { margin-left: 1ch; color: #e0af68; flex-shrink: 0; }
+
   /* Mnemonic + operands */
   .mnem { color: var(--vscode-debugTokenExpression-name, #9cdcfe); margin-right: 4px; }
   .ops  { color: var(--vscode-editor-foreground); }
@@ -410,10 +438,14 @@ function webviewHtml(): string {
   #tip .tip-reg .r { color: var(--vscode-debugTokenExpression-name, #9cdcfe); }
   #tip .tip-reg .v { color: var(--vscode-debugTokenExpression-number, #b5cea8); }
   #tip .tip-unknown { font-style: italic; opacity: 0.7; }
+  #tip .tip-note { margin-top: 5px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 4px; }
+  #tip .tip-note.warn { color: #e0af68; }
+  #tip .tip-note.info { opacity: 0.85; }
 </style>
 </head>
 <body>
 <div id="fn-name">—</div>
+<div id="pressure"></div>
 <div id="root"><p class="empty">Pause the debugger to see assembly.</p></div>
 <div id="tip"></div>
 <script>
@@ -427,6 +459,7 @@ function webviewHtml(): string {
       registers = data.registers || {};
       currentPc = data.currentPc;
       document.getElementById('fn-name').textContent = data.fnName || '(function)';
+      renderPressure(data.pressure);
       render(data.instructions, data.currentPc);
       // Scroll to the PC row after a render.
       scrollToRow(document.querySelector('.current-pc'));
@@ -484,11 +517,48 @@ function webviewHtml(): string {
         row.appendChild(opsEl);
       }
 
+      // Expensive-op warning glyph (div / fp-div / barrier). Stash notes for
+      // the hover tooltip.
+      const notes = ins.notes || [];
+      row.dataset.notes = JSON.stringify(notes);
+      if (notes.some(nt => nt.severity === 'warn')) {
+        const w = document.createElement('span');
+        w.className = 'warnflag';
+        w.textContent = '⚠';
+        row.appendChild(w);
+      }
+
       root.appendChild(row);
     });
 
     // Re-apply cursor highlight after re-render.
     applyCursorLine();
+  }
+
+  function renderPressure(p) {
+    const bar = document.getElementById('pressure');
+    if (!p || !p.nInstr) { bar.textContent = ''; return; }
+    while (bar.firstChild) bar.removeChild(bar.firstChild);
+    // "⚙ throughput floor ≈ 4.0 cyc · bound: integer divide · 0% SIMD"
+    bar.appendChild(document.createTextNode('⚙ floor ≈ '));
+    bar.appendChild(document.createTextNode(p.minCycles.toFixed(1) + ' cyc'));
+    bar.appendChild(document.createTextNode(' · bound: '));
+    const b = document.createElement('span');
+    b.className = 'bottleneck';
+    b.textContent = p.bottleneckLabel;
+    bar.appendChild(b);
+    if (p.simdShare != null) {
+      bar.appendChild(document.createTextNode(' · ' + Math.round(p.simdShare * 100) + '% SIMD'));
+    }
+    if (p.stackTraffic > 0) {
+      const s = document.createElement('span');
+      s.className = p.stackTraffic > p.nInstr * 0.25 ? 'warn' : '';
+      s.textContent = ' · ' + p.stackTraffic + ' stack op' + (p.stackTraffic === 1 ? '' : 's');
+      bar.appendChild(s);
+    }
+    bar.title = 'Static throughput floor from the Firestorm port model — optimistic '
+      + '(ignores dependency-chain latency). Names the bottleneck execution port, '
+      + 'not a cycle-accurate prediction.';
   }
 
   function applyCursorLine() {
@@ -525,6 +595,12 @@ function webviewHtml(): string {
       tip.appendChild(el('div', 'tip-desc', row.dataset.desc));
     } else {
       tip.appendChild(el('div', 'tip-desc tip-unknown', 'No description for this instruction.'));
+    }
+    // Efficiency notes (expensive-op flags) — static, valid on any row.
+    let notes = [];
+    try { notes = JSON.parse(row.dataset.notes || '[]'); } catch (e) {}
+    for (const nt of notes) {
+      tip.appendChild(el('div', 'tip-note ' + (nt.severity || 'info'), nt.text));
     }
     // Live operand values: current PC row only.
     if (row.dataset.addr === currentPc) {
