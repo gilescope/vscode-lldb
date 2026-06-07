@@ -22,13 +22,13 @@ import { glyphLegendLines } from './novsc/varEnhancer';
 import { registerEditContinue } from './editContinue';
 import { registerPerfOverlay, _perfTest } from './perfOverlay';
 import { registerStepInto } from './stepInto';
-import { registerDisasmView } from './disasmView';
+import { registerDisasmView, _disasmTest } from './disasmView';
 
 const execFileAsync = promisify(execFile);
 
 export const output = window.createOutputChannel('BugStalker');
 
-export function activate(context: ExtensionContext): { _perfTest: typeof _perfTest } {
+export function activate(context: ExtensionContext): { _perfTest: typeof _perfTest; _disasmTest: typeof _disasmTest } {
     const subscriptions = context.subscriptions;
 
     void logVersionBanner(context);
@@ -68,7 +68,7 @@ export function activate(context: ExtensionContext): { _perfTest: typeof _perfTe
     }
 
     // Exposed for the @vscode/test-electron suite (see extension/test/).
-    return { _perfTest };
+    return { _perfTest, _disasmTest };
 }
 
 export function deactivate(): void {

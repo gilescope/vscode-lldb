@@ -9,65 +9,14 @@ import {
     commands, debug, window, workspace,
     DebugAdapterTracker, DebugAdapterTrackerFactory,
     DebugSession, ExtensionContext,
-    Uri, ViewColumn, WebviewPanel,
+    ViewColumn, WebviewPanel,
 } from 'vscode';
 import { output } from './main';
-import { describeMnemonic, operandRegisters } from './asmDescribe';
-import { lineNotes, portPressure, measuredEfficiency, type EfficiencyNote, type PortPressure, type MeasuredEfficiency } from './asmModel';
-import { RUN_REGIME_MIN_INST } from './perfGauge';
+import { buildDisasmUpdate, propagateLines, type BsPerf } from './disasmData';
 
-// ── DAP wire types ─────────────────────────────────────────────────────────
-
-interface DapInstruction {
-    address: string;
-    instruction: string;
-    location?: { path?: string };
-    line?: number;
-}
-
-interface DapStackFrame {
-    source?: { path?: string };
-    line?: number;
-    instructionPointerReference?: string;
-}
-
-interface FunctionBoundsResponse {
-    startAddress?: string;
-    endAddress?: string;
-    unavailable?: boolean;
-}
-
-// ── Wire type sent to webview ──────────────────────────────────────────────
-
-interface WvInstruction {
-    srcLine: number;    // 1-based; 0 = no source info
-    text: string;       // mnemonic + operands (no address)
-    addr: string;       // normalised hex, for PC comparison
-    desc?: string;      // plain-English description of the mnemonic (static)
-    regs?: string[];    // operand register names (64-bit form), in source order
-    notes?: EfficiencyNote[]; // per-line efficiency flags (expensive ops)
-}
-
-interface WebviewUpdate {
-    type: 'update';
-    instructions: WvInstruction[];
-    currentPc: string;
-    fnName: string;
-    // Live GPR values at the current stop ({ x0: "0x…", … }), used to show the
-    // current-PC instruction's operand values in its tooltip. Empty if absent.
-    registers: Record<string, string>;
-    // Static port-pressure summary for the whole disassembled function.
-    pressure: PortPressure;
-    // Measured-vs-floor verdict (Tier 3), only when the last window was a run
-    // (enough instructions for cycles to be trustworthy). Undefined otherwise.
-    efficiency?: MeasuredEfficiency;
-}
-
-// The bits of the perf `stopped`-event body the ASM view consumes.
-interface BsPerf {
-    runCycles?: number;
-    runInstructions?: number | null;
-}
+// Wire types (DAP + webview) and the data-gathering live in disasmData.ts so the
+// build path is unit-testable without VS Code. This file is the glue: panel
+// lifecycle, the stop tracker, and the webview HTML.
 
 interface WebviewCursor {
     type: 'cursor';
@@ -155,6 +104,9 @@ function ensurePanelOpen(): void {
         }
         panel = undefined;
     });
+    // If we open (or reopen after a window reload) while already paused, render
+    // the current stop now — otherwise the panel sits blank until the next step.
+    void renderCurrent();
 }
 
 // ── Open command ───────────────────────────────────────────────────────────
@@ -186,131 +138,21 @@ async function onStop(session: DebugSession, threadId: number | undefined, perf?
     // with preserveFocusHint and can clobber the flag to false mid-stepping,
     // reverting the next F10/F11 to line-stepping.
 
-    // Top frame.
-    let frame: DapStackFrame | undefined;
-    try {
-        const resp = await session.customRequest('stackTrace', {
-            threadId: threadId ?? 1, startFrame: 0, levels: 1,
-        }) as { stackFrames?: DapStackFrame[] };
-        frame = resp.stackFrames?.[0];
-    } catch (err) {
-        output.appendLine(`[disasm] stackTrace: ${formatErr(err)}`);
-    }
-    if (!frame?.instructionPointerReference || !frame.source?.path) return;
-    currentSourcePath = frame.source.path;
-
-    // Function bounds — prefer full-function disassembly over a fixed window.
-    let memRef = frame.instructionPointerReference;
-    let instrOffset = -24;
-    let instrCount = 96;
-    let fnName = '';
-
-    try {
-        const bounds = await session.customRequest('bs/functionBounds', {}) as FunctionBoundsResponse;
-        if (!bounds.unavailable && bounds.startAddress && bounds.endAddress) {
-            const start = BigInt(bounds.startAddress);
-            const end   = BigInt(bounds.endAddress);
-            const count = Number((end - start) / 4n) + 8; // arm64: 4 bytes/insn
-            if (count > 0 && count < 4096) {
-                memRef      = bounds.startAddress;
-                instrOffset = 0;
-                instrCount  = count;
-            }
-        }
-    } catch { /* adapter too old or not supported; fall back to window */ }
-
-    try {
-        const fr = await session.customRequest('bs/currentFunctionName', {}) as { name?: string };
-        fnName = fr.name ?? '';
-    } catch { /* optional */ }
-
-    // Disassemble.
-    let rawInstructions: DapInstruction[] = [];
-    try {
-        const resp = await session.customRequest('disassemble', {
-            memoryReference: memRef,
-            instructionOffset: instrOffset,
-            instructionCount: instrCount,
-        }) as { instructions?: DapInstruction[] };
-        rawInstructions = resp.instructions ?? [];
-    } catch (err) {
-        output.appendLine(`[disasm] disassemble: ${formatErr(err)}`);
+    const result = await buildDisasmUpdate(session, threadId, perf);
+    if ('skip' in result) {
+        output.appendLine(`[disasm] no render: ${result.skip}`);
         return;
     }
-
-    // Normalise current PC.
-    let currentPc = '';
-    try { currentPc = normAddr(frame.instructionPointerReference); } catch { /* skip */ }
-
-    // Live registers for the current-PC instruction's operand-value tooltip.
-    let registers: Record<string, string> = {};
-    try {
-        const rr = await session.customRequest('bs/registers', {}) as { registers?: Record<string, string> };
-        registers = rr.registers ?? {};
-    } catch { /* optional — older adapter; tooltip shows description only */ }
-
-    // Propagate source line numbers from the first instruction of each block.
-    const instructions = propagateLines(rawInstructions, currentPc);
-
-    // Debug: show raw DWARF annotations and propagated srcLines so we can
-    // spot-check the line-number alignment.  Remove once alignment is verified.
-    const annotated = rawInstructions
-        .filter(i => i.line != null)
-        .map(i => `  addr ${normAddrSafe(i.address)}  DWARF→${i.line}`);
-    const propagated = instructions
-        .map(i => `  addr ${i.addr}  src=${i.srcLine}  ${i.text.split(/\s/)[0]}`);
-    output.appendLine(`[disasm debug] DWARF annotations:\n${annotated.join('\n')}`);
-    output.appendLine(`[disasm debug] propagated srcLines:\n${propagated.join('\n')}`);
-
-    // Static port-pressure summary for the whole function (deterministic, no PMU).
-    const pressure = portPressure(instructions.map((i) => i.text));
-
-    // Tier 3: measured-vs-floor, only in the run regime (enough instructions
-    // that the trap-corrected cycle count is trustworthy — same gate as the IPC
-    // gauge). Approximate: assumes the run was dominated by this function.
-    let efficiency: MeasuredEfficiency | undefined;
-    const runInst = perf?.runInstructions ?? 0;
-    if (perf && perf.runCycles && perf.runCycles > 0 && runInst >= RUN_REGIME_MIN_INST) {
-        efficiency = measuredEfficiency(pressure, runInst, perf.runCycles);
-    }
-
-    const msg: WebviewUpdate = { type: 'update', instructions, currentPc, fnName, registers, pressure, efficiency };
-    void panel.webview.postMessage(msg);
+    void panel.webview.postMessage(result.update);
 }
 
-// Each instruction that carries a source annotation starts a new block.
-// Instructions between annotations inherit the last seen line number.
-// Also attaches the static mnemonic description + operand register names so the
-// webview tooltip needs no per-hover round-trip.
-function propagateLines(raw: DapInstruction[], currentPc: string): WvInstruction[] {
-    let lastLine = 0;
-    return raw.map((ins) => {
-        if (ins.line != null) lastLine = ins.line;
-        let addr = ins.address;
-        try { addr = normAddr(ins.address); } catch { /* keep raw */ }
-        const text = ins.instruction;
-        const mnemonic = text.slice(0, (text.search(/\s/) + 1 || text.length + 1) - 1);
-        return {
-            srcLine: lastLine,
-            text,
-            addr,
-            desc: describeMnemonic(mnemonic),
-            regs: operandRegisters(text),
-            notes: lineNotes(text),
-        };
-    });
-}
-
-function normAddr(hex: string): string {
-    return BigInt(hex).toString(16);
-}
-
-function normAddrSafe(hex: string): string {
-    try { return normAddr(hex); } catch { return hex; }
-}
-
-function formatErr(err: unknown): string {
-    return err instanceof Error ? err.message : String(err);
+// Render the CURRENT stop without waiting for a stopped event — used when the
+// panel opens (or is reopened after a window reload) while the debuggee is
+// already paused, which otherwise leaves the panel blank until the next step.
+async function renderCurrent(): Promise<void> {
+    const session = debug.activeDebugSession;
+    if (!session || (session.type !== 'bugstalker' && session.type !== 'lldb')) return;
+    await onStop(session, lastThreadId);
 }
 
 // ── Instruction-step relay ─────────────────────────────────────────────────
@@ -681,3 +523,11 @@ function webviewHtml(): string {
 </body>
 </html>`;
 }
+
+// Exposed for the @vscode/test-electron suite — the data-gathering path is
+// tested through the activated extension API so the test stays within its
+// rootDir (no direct source import). See extension/test/disasmData.test.ts.
+export const _disasmTest = {
+    buildUpdate: buildDisasmUpdate,
+    propagateLines,
+};
