@@ -138,11 +138,15 @@ async function onStop(session: DebugSession, threadId: number | undefined, perf?
     // with preserveFocusHint and can clobber the flag to false mid-stepping,
     // reverting the next F10/F11 to line-stepping.
 
+    output.appendLine(`[disasm] stop event (thread=${threadId ?? '?'}) — building update`);
     const result = await buildDisasmUpdate(session, threadId, perf);
     if ('skip' in result) {
         output.appendLine(`[disasm] no render: ${result.skip}`);
         return;
     }
+    output.appendLine(
+        `[disasm] rendering ${result.update.instructions.length} instrs, fn="${result.update.fnName}", pc=${result.update.currentPc}`,
+    );
     void panel.webview.postMessage(result.update);
 }
 
