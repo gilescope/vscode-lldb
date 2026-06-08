@@ -147,7 +147,14 @@ async function onStop(session: DebugSession, threadId: number | undefined, perf?
     output.appendLine(
         `[disasm] rendering ${result.update.instructions.length} instrs, fn="${result.update.fnName}", pc=${result.update.currentPc}`,
     );
-    void panel.webview.postMessage(result.update);
+    panel.webview.postMessage(result.update).then(
+        (ok) => output.appendLine(`[disasm] postMessage delivered=${ok}`),
+        (err) => output.appendLine(`[disasm] postMessage FAILED: ${formatErr(err)}`),
+    );
+}
+
+function formatErr(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
 }
 
 // Render the CURRENT stop without waiting for a stopped event — used when the
@@ -320,19 +327,30 @@ function webviewHtml(): string {
   let currentPc = '';
 
   window.addEventListener('message', ({ data }) => {
-    if (data.type === 'update') {
-      registers = data.registers || {};
-      currentPc = data.currentPc;
-      document.getElementById('fn-name').textContent = data.fnName || '(function)';
-      renderPressure(data.pressure, data.efficiency);
-      render(data.instructions, data.currentPc);
-      // Scroll to the PC row after a render.
-      scrollToRow(document.querySelector('.current-pc'));
-    } else if (data.type === 'cursor') {
-      cursorLine = data.line;
-      applyCursorLine();
-      // Scroll to first matching row without jarring snap.
-      scrollToRow(document.querySelector('.cursor-line'), 'center');
+    try {
+      if (data.type === 'update') {
+        registers = data.registers || {};
+        currentPc = data.currentPc;
+        document.getElementById('fn-name').textContent = data.fnName || '(function)';
+        renderPressure(data.pressure, data.efficiency);
+        render(data.instructions, data.currentPc);
+        // Scroll to the PC row after a render.
+        scrollToRow(document.querySelector('.current-pc'));
+      } else if (data.type === 'cursor') {
+        cursorLine = data.line;
+        applyCursorLine();
+        // Scroll to first matching row without jarring snap.
+        scrollToRow(document.querySelector('.cursor-line'), 'center');
+      }
+    } catch (e) {
+      // A throw in the webview JS is otherwise invisible (no console, no
+      // extension log) and silently leaves the panel blank. Surface it.
+      const root = document.getElementById('root');
+      if (root) {
+        root.textContent = 'ASM render error: ' + (e && e.message ? e.message : e)
+          + '\\n\\n' + (e && e.stack ? e.stack : '');
+        root.className = 'empty';
+      }
     }
   });
 
