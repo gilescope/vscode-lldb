@@ -18,6 +18,7 @@ interface BuildResult {
 interface DisasmTestApi {
     buildUpdate(session: SessionLike, threadId: number | undefined, perf?: unknown): Promise<BuildResult>;
     propagateLines(raw: { address: string; instruction?: string; line?: number }[]): WvInstruction[];
+    webviewHtml(): string;
 }
 
 type Responses = Record<string, unknown>;
@@ -116,5 +117,19 @@ describe('disasm data-gathering', () => {
         assert.strictEqual(rows.length, 2);
         assert.strictEqual(rows[1].text, '');
         assert.strictEqual(rows[1].srcLine, 5, 'inherits the last source line');
+    });
+
+    // Regression: the inlined webview JS lives inside an HTML *template literal*,
+    // so a `\n` in the source becomes a real newline — which, inside a JS string
+    // literal, is an unterminated-string SYNTAX ERROR. That kills the whole
+    // script: no message listener registers, postMessage reports delivered=true,
+    // and the panel stays blank with no error anywhere. Parse it to catch any
+    // such breakage (Tier 3's `title += '\n\n…'` was exactly this).
+    it('the inlined webview script parses (no syntax errors)', () => {
+        const html = api.webviewHtml();
+        const m = html.match(/<script>([\s\S]*?)<\/script>/);
+        assert.ok(m, 'webview HTML must contain a <script> block');
+        // new Function throws on a syntax error without executing the body.
+        assert.doesNotThrow(() => { new Function(m![1]); }, 'webview script has a syntax error');
     });
 });

@@ -138,23 +138,13 @@ async function onStop(session: DebugSession, threadId: number | undefined, perf?
     // with preserveFocusHint and can clobber the flag to false mid-stepping,
     // reverting the next F10/F11 to line-stepping.
 
-    output.appendLine(`[disasm] stop event (thread=${threadId ?? '?'}) — building update`);
     const result = await buildDisasmUpdate(session, threadId, perf);
     if ('skip' in result) {
+        // Why a blank panel — keeps the failure diagnosable instead of silent.
         output.appendLine(`[disasm] no render: ${result.skip}`);
         return;
     }
-    output.appendLine(
-        `[disasm] rendering ${result.update.instructions.length} instrs, fn="${result.update.fnName}", pc=${result.update.currentPc}`,
-    );
-    panel.webview.postMessage(result.update).then(
-        (ok) => output.appendLine(`[disasm] postMessage delivered=${ok}`),
-        (err) => output.appendLine(`[disasm] postMessage FAILED: ${formatErr(err)}`),
-    );
-}
-
-function formatErr(err: unknown): string {
-    return err instanceof Error ? err.message : String(err);
+    void panel.webview.postMessage(result.update);
 }
 
 // Render the CURRENT stop without waiting for a stopped event — used when the
@@ -449,7 +439,7 @@ function webviewHtml(): string {
       e.className = eff.bound === 'stalls' ? 'warn' : 'bottleneck';
       e.textContent = 'measured ' + eff.ratio.toFixed(1) + '× floor';
       bar.appendChild(e);
-      title += '\n\nMeasured: ' + eff.verdict + ' (run-regime, approximate — assumes the run was dominated by this function).';
+      title += '\\n\\nMeasured: ' + eff.verdict + ' (run-regime, approximate — assumes the run was dominated by this function).';
     }
     bar.title = title;
   }
@@ -552,4 +542,5 @@ function webviewHtml(): string {
 export const _disasmTest = {
     buildUpdate: buildDisasmUpdate,
     propagateLines,
+    webviewHtml,
 };
