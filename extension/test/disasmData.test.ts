@@ -19,6 +19,7 @@ interface DisasmTestApi {
     buildUpdate(session: SessionLike, threadId: number | undefined, perf?: unknown): Promise<BuildResult>;
     propagateLines(raw: { address: string; instruction?: string; line?: number }[]): WvInstruction[];
     webviewHtml(): string;
+    asmFocusShouldSend(sessionType: string): boolean;
 }
 
 type Responses = Record<string, unknown>;
@@ -131,5 +132,23 @@ describe('disasm data-gathering', () => {
         assert.ok(m, 'webview HTML must contain a <script> block');
         // new Function throws on a syntax error without executing the body.
         assert.doesNotThrow(() => { new Function(m![1]); }, 'webview script has a syntax error');
+    });
+
+    // Regression: focusing the ASM pane must enable instruction-level F10/F11.
+    // That works by sending bs/setAsmFocus to the adapter — but only for
+    // BugStalker-family sessions. RA's "Debug" codelens launches a `lldb`-typed
+    // session, so it MUST be included or instruction stepping never engages.
+    describe('asm-focus session-type gate', () => {
+        it('sends for native bugstalker sessions', () => {
+            assert.strictEqual(api.asmFocusShouldSend('bugstalker'), true);
+        });
+        it('sends for lldb sessions (RA Debug codelens)', () => {
+            assert.strictEqual(api.asmFocusShouldSend('lldb'), true,
+                'lldb sessions must get asm-focus sync — else no instruction stepping from the RA Debug button');
+        });
+        it('does not send for unrelated session types', () => {
+            assert.strictEqual(api.asmFocusShouldSend('node'), false);
+            assert.strictEqual(api.asmFocusShouldSend('python'), false);
+        });
     });
 });

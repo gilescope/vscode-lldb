@@ -92,16 +92,10 @@ function ensurePanelOpen(): void {
     );
     panel.webview.html = webviewHtml();
     panel.onDidChangeViewState((e) => {
-        const session = debug.activeDebugSession;
-        if (session?.type === 'bugstalker') {
-            void session.customRequest('bs/setAsmFocus', { focused: e.webviewPanel.active });
-        }
+        sendAsmFocus(debug.activeDebugSession, e.webviewPanel.active);
     });
     panel.onDidDispose(() => {
-        const session = debug.activeDebugSession;
-        if (session?.type === 'bugstalker') {
-            void session.customRequest('bs/setAsmFocus', { focused: false });
-        }
+        sendAsmFocus(debug.activeDebugSession, false);
         panel = undefined;
     });
     // If we open (or reopen after a window reload) while already paused, render
@@ -154,6 +148,23 @@ async function renderCurrent(): Promise<void> {
     const session = debug.activeDebugSession;
     if (!session || (session.type !== 'bugstalker' && session.type !== 'lldb')) return;
     await onStop(session, lastThreadId);
+}
+
+// Tell the adapter whether the Source+ASM panel is focused, so F10/F11 step at
+// instruction granularity while it's active (adapter field `asm_view_focused`).
+// The session-type decision is split out into `asmFocusShouldSend` so it's
+// unit-testable without a live session.
+function sendAsmFocus(session: DebugSession | undefined, focused: boolean): void {
+    if (session && asmFocusShouldSend(session.type)) {
+        void session.customRequest('bs/setAsmFocus', { focused });
+    }
+}
+
+/** Which debug session types get the asm-focus sync. Both the native
+ *  `bugstalker` type and the CodeLLDB-compatible `lldb` alias (what RA's Debug
+ *  codelens launches) — matching every other session-type check in this file. */
+export function asmFocusShouldSend(sessionType: string): boolean {
+    return sessionType === 'bugstalker' || sessionType === 'lldb';
 }
 
 // ── Instruction-step relay ─────────────────────────────────────────────────
@@ -543,4 +554,5 @@ export const _disasmTest = {
     buildUpdate: buildDisasmUpdate,
     propagateLines,
     webviewHtml,
+    asmFocusShouldSend,
 };
