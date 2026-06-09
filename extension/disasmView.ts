@@ -234,19 +234,13 @@ function webviewHtml(): string {
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
-  html, body {
+  body {
     font-family: var(--vscode-editor-font-family, 'Menlo', monospace);
     font-size: var(--vscode-editor-font-size, 13px);
     line-height: 1.5;
     background: var(--vscode-editor-background);
     color: var(--vscode-editor-foreground);
     overflow-y: scroll;
-    /* Scrolloff: scrollIntoView keeps the PC row this far from the edges — top
-       clears the sticky fn-name + pressure bars (~3em) plus context; bottom is
-       a few rows of look-ahead. Whichever element actually scrolls (html or
-       body), it honours these. */
-    scroll-padding-top: 5.5em;
-    scroll-padding-bottom: 5em;
   }
 
   #fn-name {
@@ -375,6 +369,8 @@ function webviewHtml(): string {
   let registers = {};   // live GPRs at the current stop ({ x0: "0x…", … })
   let currentPc = '';
   let lastSig = '';     // identifies the currently-rendered instruction list
+  let rowByAddr = {};   // addr → row element, for O(1) PC moves (no DOM scan)
+  let pcRow = null;     // the currently-highlighted row
 
   window.addEventListener('message', ({ data }) => {
     try {
@@ -424,6 +420,8 @@ function webviewHtml(): string {
       return;
     }
 
+    rowByAddr = {};
+    pcRow = null;
     let lastLine = 0;
     instructions.forEach(ins => {
       const isCurrent = ins.addr === currentPc;
@@ -435,6 +433,8 @@ function webviewHtml(): string {
       if (ins.explain) row.dataset.explain = ins.explain;
       row.dataset.regs = JSON.stringify(ins.regs || []);
       row.dataset.addr = ins.addr;
+      rowByAddr[ins.addr] = row;
+      if (isCurrent) pcRow = row;
 
       // Line-number cell.
       const ln = document.createElement('span');
@@ -528,21 +528,30 @@ function webviewHtml(): string {
   // Stepping within the same function: just move the current-PC highlight to the
   // new address and nudge it into view only if it's drifted off-screen — no DOM
   // rebuild, so the scroll position is preserved (no jump-to-top-and-back).
+  // Move the PC highlight with the minimum possible work: un-highlight the old
+  // row, highlight the new one (O(1) via the addr→row map — no DOM scan, no
+  // rebuild). The ONLY visible change is the highlight, unless the new PC would
+  // be off-screen (keepPcVisible decides).
   function movePc(pc) {
-    document.querySelectorAll('.row').forEach(el => {
-      el.classList.toggle('current-pc', el.dataset.addr === pc);
-    });
+    if (pcRow) pcRow.classList.remove('current-pc');
+    pcRow = rowByAddr[pc] || null;
+    if (!pcRow) return;
+    pcRow.classList.add('current-pc');
     keepPcVisible();
   }
 
-  // Keep the current-PC row visible while stepping. scrollIntoView scrolls
-  // whichever ancestor actually scrolls (here the body, via overflow-y:scroll),
-  // so it works where a manual window.scrollBy is a no-op. block:'nearest' only
-  // scrolls when the row leaves the viewport, and the body's scroll-padding
-  // gives the scrolloff margin (clear of the sticky headers, look-ahead below).
+  // Scroll ONLY when the PC isn't fully visible (off the bottom, or hidden under
+  // the sticky header). While it's on screen we do nothing — stepping is just
+  // the highlight moving, zero view movement. When it does leave, recenter once
+  // (block:'center'), so the next half-screen of steps need no scroll at all.
   function keepPcVisible() {
-    const row = document.querySelector('.current-pc');
-    if (row) row.scrollIntoView({ block: 'nearest' });
+    if (!pcRow) return;
+    const fn = document.getElementById('fn-name');
+    const pr = document.getElementById('pressure');
+    const headerH = (fn ? fn.offsetHeight : 0) + (pr ? pr.offsetHeight : 0);
+    const r = pcRow.getBoundingClientRect();
+    if (r.top >= headerH && r.bottom <= window.innerHeight) return; // fully visible: leave it
+    pcRow.scrollIntoView({ block: 'center' });
   }
 
   // ── Instruction tooltip ────────────────────────────────────────────────
