@@ -31,6 +31,7 @@ let currentSourcePath: string | undefined;
 let lastSession: DebugSession | undefined;
 let lastThreadId: number | undefined;
 let lastUpdateSig = '';   // signature of the last posted instruction list (diagnostic)
+let lastPc = 0;           // last PC (diagnostic: instruction-step vs line-step delta)
 // Timestamp of the last stopped event. A debug step reveals the source line and
 // momentarily steals focus from the asm pane; if the pane goes inactive within
 // this window of a stop, we treat it as that reveal (not the user leaving) and
@@ -156,12 +157,16 @@ async function onStop(session: DebugSession, threadId: number | undefined, perf?
         output.appendLine(`[disasm] no render: ${result.skip}`);
         return;
     }
-    // Diagnostic: did the instruction list change (full webview rebuild) or is
-    // this a same-function step (cheap PC move)? A "rebuild" every step would
-    // explain residual scroll jumpiness.
+    // Diagnostic: rebuild vs PC-move, AND the PC delta — a single-instruction
+    // step moves ~4 bytes; a much larger jump means a LINE-level step (the asm
+    // pane wasn't treated as focused), which is what makes stepping look jumpy.
     const sig = result.update.instructions.length + '@' + (result.update.instructions[0]?.addr ?? '');
-    output.appendLine(`[disasm] ${sig === lastUpdateSig ? 'same fn (move PC)' : 'new fn (rebuild)'} pc=${result.update.currentPc}`);
+    const pcNum = parseInt(result.update.currentPc, 16);
+    const delta = lastPc && Number.isFinite(pcNum) ? Math.abs(pcNum - lastPc) : 0;
+    const kind = delta === 0 ? '' : delta <= 8 ? ` Δ${delta} (instr step)` : ` Δ${delta} (LINE step — not instruction-level!)`;
+    output.appendLine(`[disasm] ${sig === lastUpdateSig ? 'same fn' : 'new fn (rebuild)'} pc=${result.update.currentPc}${kind}`);
     lastUpdateSig = sig;
+    lastPc = Number.isFinite(pcNum) ? pcNum : lastPc;
     void panel.webview.postMessage(result.update);
 }
 
@@ -180,6 +185,7 @@ async function renderCurrent(): Promise<void> {
 // unit-testable without a live session.
 function sendAsmFocus(session: DebugSession | undefined, focused: boolean): void {
     if (session && asmFocusShouldSend(session.type)) {
+        output.appendLine(`[disasm] setAsmFocus(${focused})`);   // diagnostic
         void session.customRequest('bs/setAsmFocus', { focused });
     }
 }
