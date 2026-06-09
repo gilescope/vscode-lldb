@@ -234,13 +234,19 @@ function webviewHtml(): string {
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
-  body {
+  html, body {
     font-family: var(--vscode-editor-font-family, 'Menlo', monospace);
     font-size: var(--vscode-editor-font-size, 13px);
     line-height: 1.5;
     background: var(--vscode-editor-background);
     color: var(--vscode-editor-foreground);
     overflow-y: scroll;
+    /* Scrolloff: scrollIntoView keeps the PC row this far from the edges — top
+       clears the sticky fn-name + pressure bars (~3em) plus context; bottom is
+       a few rows of look-ahead. Whichever element actually scrolls (html or
+       body), it honours these. */
+    scroll-padding-top: 5.5em;
+    scroll-padding-bottom: 5em;
   }
 
   #fn-name {
@@ -529,25 +535,14 @@ function webviewHtml(): string {
     keepPcVisible();
   }
 
-  // Editor-style "scrolloff": keep the current-PC row inside a comfortable band,
-  // never jammed against the top/bottom edge (and never hidden under the sticky
-  // header bars). Only scrolls when the PC leaves the band, so stepping reads as
-  // the highlight gliding, with context above and below — no jump-to-edge.
+  // Keep the current-PC row visible while stepping. scrollIntoView scrolls
+  // whichever ancestor actually scrolls (here the body, via overflow-y:scroll),
+  // so it works where a manual window.scrollBy is a no-op. block:'nearest' only
+  // scrolls when the row leaves the viewport, and the body's scroll-padding
+  // gives the scrolloff margin (clear of the sticky headers, look-ahead below).
   function keepPcVisible() {
     const row = document.querySelector('.current-pc');
-    if (!row) return;
-    const fn = document.getElementById('fn-name');
-    const pr = document.getElementById('pressure');
-    const headerH = (fn ? fn.offsetHeight : 0) + (pr ? pr.offsetHeight : 0);
-    const r = row.getBoundingClientRect();
-    const margin = Math.max(40, r.height * 4);     // ~4 rows of context
-    const bandTop = headerH + margin;
-    const bandBottom = window.innerHeight - margin;
-    if (r.top < bandTop) {
-      window.scrollBy(0, r.top - bandTop);         // PC near/above the top → scroll up
-    } else if (r.bottom > bandBottom) {
-      window.scrollBy(0, r.bottom - bandBottom);   // PC near/below the bottom → scroll down
-    }
+    if (row) row.scrollIntoView({ block: 'nearest' });
   }
 
   // ── Instruction tooltip ────────────────────────────────────────────────
