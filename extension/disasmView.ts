@@ -66,9 +66,13 @@ export function registerDisasmView(ctx: ExtensionContext): void {
             if (e.textEditor.document.languageId !== 'rust') return;
             if (e.textEditor.document.uri.scheme !== 'file') return;
             const line = (e.selections[0]?.active.line ?? 0) + 1;
-            const scroll = e.kind === TextEditorSelectionChangeKind.Mouse
+            const userMoved = e.kind === TextEditorSelectionChangeKind.Mouse
                 || e.kind === TextEditorSelectionChangeKind.Keyboard;
-            const msg: WebviewCursor = { type: 'cursor', line, scroll };
+            // A real interaction with the source editor = "working in source" →
+            // line-step. (A debug stop's programmatic reveal is kind Command/
+            // undefined and must NOT flip us out of instruction-stepping.)
+            if (userMoved) sendAsmFocus(debug.activeDebugSession, false);
+            const msg: WebviewCursor = { type: 'cursor', line, scroll: userMoved };
             void panel.webview.postMessage(msg);
         }),
     );
@@ -102,21 +106,26 @@ function ensurePanelOpen(): void {
         { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [], enableFindWidget: true },
     );
     panel.webview.html = webviewHtml();
-    // Instruction-stepping is tied to the asm pane being VISIBLE, not focused.
-    // A step reveals the source line and pulls keyboard focus there, but the pane
-    // stays visible and you're still walking the assembly — so keep stepping at
-    // instruction granularity. Focus is too fragile (the first step before you
-    // click the pane would be a line step). Hidden/closed → back to line steps.
+    // Instruction-stepping = "the user is working in the asm pane". Driven by
+    // USER intent only, never programmatic focus moves:
+    //   • user clicks the pane (active) → instruction-step
+    //   • pane hidden/closed         → line-step
+    //   • a debug stop deactivates the pane but leaves it VISIBLE — that's the
+    //     per-step source reveal, NOT the user leaving, so we don't flip back
+    //     (continuous instruction-stepping survives it).
+    // Clicking/typing in the source editor flips back to line-step (see the
+    // onDidChangeTextEditorSelection handler).
     panel.onDidChangeViewState((e) => {
-        sendAsmFocus(debug.activeDebugSession, e.webviewPanel.visible);
+        if (e.webviewPanel.active) {
+            sendAsmFocus(debug.activeDebugSession, true);
+        } else if (!e.webviewPanel.visible) {
+            sendAsmFocus(debug.activeDebugSession, false);
+        }
     });
     panel.onDidDispose(() => {
         sendAsmFocus(debug.activeDebugSession, false);
         panel = undefined;
     });
-    // The panel is visible from creation, so flag instruction-stepping now —
-    // onDidChangeViewState may not fire for the initial show.
-    sendAsmFocus(debug.activeDebugSession, panel.visible);
     // If we open (or reopen after a window reload) while already paused, render
     // the current stop now — otherwise the panel sits blank until the next step.
     void renderCurrent();
