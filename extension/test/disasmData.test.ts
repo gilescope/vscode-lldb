@@ -21,7 +21,6 @@ interface DisasmTestApi {
     propagateLines(raw: { address: string; instruction?: string; line?: number }[]): WvInstruction[];
     webviewHtml(): string;
     asmFocusShouldSend(sessionType: string): boolean;
-    shouldReclaimAsmFocus(asmWasActive: boolean, stopReason: string | undefined): boolean;
     explainInstruction(text: string): string | undefined;
 }
 
@@ -172,28 +171,6 @@ describe('disasm data-gathering', () => {
         it('does not send for unrelated session types', () => {
             assert.strictEqual(api.asmFocusShouldSend('node'), false);
             assert.strictEqual(api.asmFocusShouldSend('python'), false);
-        });
-    });
-
-    // Regression: stepping in the asm pane pulled focus to the source editor
-    // (VS Code activates the source group on a cross-column reveal, even with
-    // preserveFocusHint). We reclaim focus, but only after a *step* and only if
-    // the asm pane was the active editor — not on breakpoints/pauses, where
-    // landing in source is what the user wants.
-    describe('asm-focus reclaim gate', () => {
-        it('reclaims after a step when the asm pane was active', () => {
-            assert.strictEqual(api.shouldReclaimAsmFocus(true, 'step'), true);
-        });
-        it('does not reclaim when the asm pane was not active', () => {
-            assert.strictEqual(api.shouldReclaimAsmFocus(false, 'step'), false);
-        });
-        it('does not reclaim on a breakpoint (land in source)', () => {
-            assert.strictEqual(api.shouldReclaimAsmFocus(true, 'breakpoint'), false);
-        });
-        it('does not reclaim on pause/exception', () => {
-            assert.strictEqual(api.shouldReclaimAsmFocus(true, 'pause'), false);
-            assert.strictEqual(api.shouldReclaimAsmFocus(true, 'exception'), false);
-            assert.strictEqual(api.shouldReclaimAsmFocus(true, undefined), false);
         });
     });
 

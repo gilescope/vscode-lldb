@@ -30,11 +30,14 @@ let panel: WebviewPanel | undefined;
 let currentSourcePath: string | undefined;
 let lastSession: DebugSession | undefined;
 let lastThreadId: number | undefined;
-// Whether the Source+ASM panel was the active editor — sampled the instant a
-// stopped event arrives, before VS Code reveals the source line and steals
-// focus. Drives focus-reclaim so instruction-stepping stays in the asm pane.
-let asmPanelActive = false;
 let lastUpdateSig = '';   // signature of the last posted instruction list (diagnostic)
+// Timestamp of the last stopped event. A debug step reveals the source line and
+// momentarily steals focus from the asm pane; if the pane goes inactive within
+// this window of a stop, we treat it as that reveal (not the user leaving) and
+// keep the adapter's instruction-step flag set — without grabbing focus back,
+// which was causing a visible jump.
+let lastStoppedAt = 0;
+const FOCUS_GRACE_MS = 250;
 
 // ── Registration ───────────────────────────────────────────────────────────
 
@@ -71,15 +74,10 @@ export function registerDisasmView(ctx: ExtensionContext): void {
     const factory: DebugAdapterTrackerFactory = {
         createDebugAdapterTracker(session: DebugSession): DebugAdapterTracker {
             return {
-                onDidSendMessage(m: { type?: string; event?: string; body?: { threadId?: number; bs_perf?: BsPerf; reason?: string } }) {
+                onDidSendMessage(m: { type?: string; event?: string; body?: { threadId?: number; bs_perf?: BsPerf } }) {
                     if (m.type !== 'event' || m.event !== 'stopped') return;
-                    // Sample focus NOW — synchronously, before VS Code reveals
-                    // the source and clears it.
-                    const wasAsmActive = asmPanelActive;
+                    lastStoppedAt = Date.now();   // for the focus-grace window
                     void onStop(session, m.body?.threadId, m.body?.bs_perf);
-                    if (shouldReclaimAsmFocus(wasAsmActive, m.body?.reason)) {
-                        reclaimAsmFocus();
-                    }
                 },
             };
         },
@@ -104,11 +102,17 @@ function ensurePanelOpen(): void {
     );
     panel.webview.html = webviewHtml();
     panel.onDidChangeViewState((e) => {
-        asmPanelActive = e.webviewPanel.active;
-        sendAsmFocus(debug.activeDebugSession, e.webviewPanel.active);
+        const active = e.webviewPanel.active;
+        // A debug step reveals the source line and momentarily steals focus from
+        // the asm pane. Don't read that as "left the asm pane" — keep the
+        // adapter's instruction-step flag set (next F10/F11 stays per-instruction)
+        // and don't fight it visually (no reveal → no focus ping-pong jump). A
+        // genuine click elsewhere — not within the grace window of a stop — still
+        // clears it.
+        if (!active && Date.now() - lastStoppedAt < FOCUS_GRACE_MS) return;
+        sendAsmFocus(debug.activeDebugSession, active);
     });
     panel.onDidDispose(() => {
-        asmPanelActive = false;
         sendAsmFocus(debug.activeDebugSession, false);
         panel = undefined;
     });
@@ -185,26 +189,6 @@ function sendAsmFocus(session: DebugSession | undefined, focused: boolean): void
  *  codelens launches) — matching every other session-type check in this file. */
 export function asmFocusShouldSend(sessionType: string): boolean {
     return sessionType === 'bugstalker' || sessionType === 'lldb';
-}
-
-/** Whether to pull focus back to the asm pane after a stop. Only when it was
- *  the active editor AND this stop came from a step — on a breakpoint / pause /
- *  exception the user expects to land in source, so we leave focus alone.
- *  preserveFocusHint should keep focus on the webview, but VS Code still
- *  activates the source group on a cross-column reveal, so we reclaim it. */
-export function shouldReclaimAsmFocus(asmWasActive: boolean, stopReason: string | undefined): boolean {
-    return asmWasActive && stopReason === 'step';
-}
-
-// Re-reveal the panel WITH focus, deferred past VS Code's own stop-handling
-// (which reveals + focuses the source line this same tick). Keeps the user in
-// the asm pane while instruction-stepping.
-function reclaimAsmFocus(): void {
-    if (!panel) return;
-    const column = panel.viewColumn ?? ViewColumn.Two;
-    setTimeout(() => {
-        try { panel?.reveal(column, false); } catch { /* panel closed mid-step */ }
-    }, 0);
 }
 
 // ── Instruction-step relay ─────────────────────────────────────────────────
@@ -669,6 +653,5 @@ export const _disasmTest = {
     propagateLines,
     webviewHtml,
     asmFocusShouldSend,
-    shouldReclaimAsmFocus,
     explainInstruction,
 };
