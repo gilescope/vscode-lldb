@@ -218,5 +218,30 @@ describe('disasm data-gathering', () => {
             assert.strictEqual(api.explainInstruction('bl 0x1000'), undefined);
             assert.strictEqual(api.explainInstruction('ret'), undefined);
         });
+
+        it('decodes a store to memory (the user\'s case)', () => {
+            assert.strictEqual(api.explainInstruction('str w8, [sp, #0x28]'), '[sp + 0x28] = w8');
+        });
+        it('decodes a load from memory', () => {
+            assert.strictEqual(api.explainInstruction('ldr x0, [sp, #16]'), 'x0 = [sp + 16]');
+        });
+        it('decodes a negative offset and a bare base', () => {
+            assert.strictEqual(api.explainInstruction('ldur x0, [x1, #-8]'), 'x0 = [x1 − 8]');
+            assert.strictEqual(api.explainInstruction('ldr x0, [x1]'), 'x0 = [x1]');
+        });
+        it('decodes a register + shifted-register offset', () => {
+            assert.strictEqual(api.explainInstruction('ldr x0, [x1, x2, lsl #3]'), 'x0 = [x1 + (x2 << 3)]');
+        });
+        it('decodes a sub-word load with a size note', () => {
+            assert.strictEqual(api.explainInstruction('ldrb w0, [x1, #4]'), 'w0 = [x1 + 4] (byte)');
+        });
+        it('decodes a pre-index store pair (stack push)', () => {
+            assert.strictEqual(api.explainInstruction('stp x29, x30, [sp, #-16]!'),
+                'sp = sp − 16; [sp] = x29; [sp + 8] = x30');
+        });
+        it('decodes a post-index load pair (stack pop)', () => {
+            assert.strictEqual(api.explainInstruction('ldp x29, x30, [sp], #16'),
+                'x29 = [sp]; x30 = [sp + 8]; sp = sp + 16');
+        });
     });
 });

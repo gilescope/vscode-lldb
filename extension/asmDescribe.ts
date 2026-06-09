@@ -161,6 +161,76 @@ function decodeOperand(op: string): string {
     return m ? m[1] : op;
 }
 
+// Render an AArch64 memory addressing operand's *inside* (`sp, #0x28`,
+// `x1, x2, lsl #2`, `x0`) as an arithmetic address (`sp + 0x28`).
+function formatAddr(inside: string): string {
+    const parts = inside.split(',').map((s) => s.trim());
+    const base = parts[0];
+    if (parts.length < 2) return base;
+    const off = parts[1];
+    const im = off.match(/^#(-?)(0x[0-9a-fA-F]+|\d+)$/);
+    if (im) {
+        return base + (im[1] === '-' ? ' − ' : ' + ') + im[2];
+    }
+    const shift = parts[2]?.match(/(lsl|lsr|asr)\s+#(\d+)/i);
+    if (shift) return `${base} + (${off} << ${shift[2]})`;
+    return `${base} + ${off}`;
+}
+
+// Size/sign note for sub-word load/store variants.
+function memSizeNote(mnem: string): string {
+    switch (mnem) {
+        case 'ldrb': case 'strb': return ' (byte)';
+        case 'ldrh': case 'strh': return ' (halfword)';
+        case 'ldrsb': return ' (signed byte)';
+        case 'ldrsh': return ' (signed halfword)';
+        case 'ldrsw': return ' (signed word)';
+        default: return '';
+    }
+}
+
+// Decode a load/store into `dst = [addr]` / `[addr] = src`, including pre-index
+// (`[sp, #-16]!`) and post-index (`[sp], #16`) writeback, and ld/st pairs.
+// Returns undefined for non-memory mnemonics.
+function decodeMemory(mnem: string, rest: string): string | undefined {
+    const isLoad = mnem.startsWith('ld');
+    const isStore = mnem.startsWith('st');
+    if (!isLoad && !isStore) return undefined;
+    const br = rest.indexOf('[');
+    const end = rest.indexOf(']', br);
+    if (br < 0 || end < 0) return undefined;
+
+    const regs = rest.slice(0, br).split(',').map((s) => s.trim()).filter(Boolean);
+    if (regs.length === 0) return undefined;
+    const inside = rest.slice(br + 1, end).trim();
+    const base = inside.split(',')[0].trim();
+    const after = rest.slice(end + 1).trim();
+    const preIndex = after.startsWith('!');
+    const postImm = after.match(/^,\s*#(-?)(0x[0-9a-fA-F]+|\d+)/);
+
+    const size = memSizeNote(mnem);
+    const isPair = regs.length === 2;
+    // Pre-index updates the base to (base+offset) *before* the access, so the
+    // access is then through the bare base; post-index accesses [base] first.
+    const addr = preIndex || postImm ? base : formatAddr(inside);
+
+    const access = (i: number, plus = 0): string => {
+        const at = plus ? `[${addr} + ${plus}]` : `[${addr}]`;
+        return isLoad ? `${regs[i]} = ${at}${size}` : `${at} = ${regs[i]}${size}`;
+    };
+    let body = isPair ? `${access(0)}; ${access(1, 8)}` : access(0);
+
+    if (preIndex) {
+        // e.g. stp …, [sp, #-16]!  →  sp = sp − 16; [sp] = …   (a stack push)
+        body = `${base} = ${formatAddr(inside)}; ${body}`;
+    } else if (postImm) {
+        // e.g. ldp …, [sp], #16  →  … = [sp]; sp = sp + 16   (a stack pop)
+        const sign = postImm[1] === '-' ? ' − ' : ' + ';
+        body = `${body}; ${base} = ${base}${sign}${postImm[2]}`;
+    }
+    return body;
+}
+
 /**
  * One-line plain-English decode for common instruction forms, or undefined for
  * forms we don't model (the mnemonic description still shows). Uses the real
@@ -170,7 +240,13 @@ export function explainInstruction(text: string): string | undefined {
     const sp = text.search(/\s/);
     if (sp < 0) return undefined;
     const mnem = baseMnemonic(text.slice(0, sp));
-    const ops = text.slice(sp + 1).split(',').map((s) => s.trim()).filter(Boolean);
+    const rest = text.slice(sp + 1);
+
+    // Loads/stores: decode the addressing mode into `dst = [addr]` / `[addr] = src`.
+    const mem = decodeMemory(mnem, rest);
+    if (mem) return mem;
+
+    const ops = rest.split(',').map((s) => s.trim()).filter(Boolean);
     // `s`-suffixed ALU ops also set the N/Z/C/V condition flags.
     const setsFlags = (mnem === 'adds' || mnem === 'subs' || mnem === 'ands')
         ? ', and update the condition flags' : '';
