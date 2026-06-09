@@ -542,16 +542,27 @@ function webviewHtml(): string {
 
   // Scroll ONLY when the PC isn't fully visible (off the bottom, or hidden under
   // the sticky header). While it's on screen we do nothing — stepping is just
-  // the highlight moving, zero view movement. When it does leave, recenter once
-  // (block:'center'), so the next half-screen of steps need no scroll at all.
+  // the highlight moving, zero view movement. When it must scroll, reposition
+  // toward the FAR edge in the direction of travel, so there's almost a full
+  // screen of runway before the next scroll (rare repositions, not constant
+  // nudging). Stepping forward marches down; backward retreats into rows that
+  // are already on screen, so backward rarely triggers this at all.
   function keepPcVisible() {
     if (!pcRow) return;
     const fn = document.getElementById('fn-name');
     const pr = document.getElementById('pressure');
     const headerH = (fn ? fn.offsetHeight : 0) + (pr ? pr.offsetHeight : 0);
+    const runway = window.innerHeight * 0.15;     // land 15% from the edge
     const r = pcRow.getBoundingClientRect();
-    if (r.top >= headerH && r.bottom <= window.innerHeight) return; // fully visible: leave it
-    pcRow.scrollIntoView({ block: 'center' });
+    if (r.bottom > window.innerHeight) {
+      // stepping forward off the bottom → put the PC near the top
+      pcRow.style.scrollMarginTop = (headerH + runway) + 'px';
+      pcRow.scrollIntoView({ block: 'start' });
+    } else if (r.top < headerH) {
+      // stepping back above the header → put the PC near the bottom
+      pcRow.style.scrollMarginBottom = runway + 'px';
+      pcRow.scrollIntoView({ block: 'end' });
+    }
   }
 
   // ── Instruction tooltip ────────────────────────────────────────────────
