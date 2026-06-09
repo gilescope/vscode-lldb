@@ -67,6 +67,10 @@ export function registerDisasmView(ctx: ExtensionContext): void {
             if (e.textEditor.document.uri.scheme !== 'file') return;
             const line = (e.selections[0]?.active.line ?? 0) + 1;
             const userMoved = isUserCursorMove(e.kind);
+            // Diagnostic: what kind does the REAL debug-stop reveal fire? (My
+            // proof tested editor.selection=…, which may differ from VS Code's
+            // own reveal.) If this logs Mouse/Keyboard on a step, the gate fails.
+            output.appendLine(`[disasm] cursor kind=${e.kind} line=${line} userMoved=${userMoved}`);
             // A real interaction with the source editor = "working in source" →
             // line-step. (A debug stop's programmatic reveal is kind Command/
             // undefined and must NOT flip us out of instruction-stepping.)
@@ -116,8 +120,18 @@ function ensurePanelOpen(): void {
     // onDidChangeTextEditorSelection handler).
     panel.onDidChangeViewState((e) => {
         const mode = viewStateStepMode(e.webviewPanel.active, e.webviewPanel.visible);
-        if (mode === 'instruction') sendAsmFocus(debug.activeDebugSession, true);
-        else if (mode === 'line') sendAsmFocus(debug.activeDebugSession, false);
+        if (mode === 'instruction') {
+            sendAsmFocus(debug.activeDebugSession, true);
+            // Experiment (user's idea): a real step "corrects" the view because
+            // its stopped event re-renders the asm pane. Replicate that here — a
+            // "no-op step" — when the user focuses the pane: re-fetch + re-render
+            // the CURRENT stop, no debugger movement. If this corrects the drift,
+            // the bug is that normal stepping doesn't reposition the PC.
+            output.appendLine('[disasm] focus gained → renderCurrent (no-op step)');
+            void renderCurrent();
+        } else if (mode === 'line') {
+            sendAsmFocus(debug.activeDebugSession, false);
+        }
     });
     panel.onDidDispose(() => {
         sendAsmFocus(debug.activeDebugSession, false);
