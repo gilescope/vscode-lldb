@@ -21,7 +21,8 @@ import { explainInstruction } from './asmDescribe';
 
 interface WebviewCursor {
     type: 'cursor';
-    line: number;   // 1-based
+    line: number;    // 1-based
+    scroll: boolean; // recentre the asm view on this line (true = user moved the cursor)
 }
 
 // ── Module-level state ─────────────────────────────────────────────────────
@@ -31,6 +32,12 @@ let currentSourcePath: string | undefined;
 let lastSession: DebugSession | undefined;
 let lastThreadId: number | undefined;
 let lastUpdateSig = '';   // signature of the last posted instruction list (diagnostic)
+// A debug stop reveals the current source line, which moves the editor cursor
+// and fires onDidChangeTextEditorSelection. That's NOT the user navigating, so
+// the asm view must not recentre on it (the smooth scroll-to-cursor was the
+// stepping "jump"). Cursor changes within this window of a stop are debug-driven.
+let lastStoppedAt = 0;
+const CURSOR_SCROLL_GRACE_MS = 300;
 let lastPc = 0;           // last PC (diagnostic: instruction-step vs line-step delta)
 
 // ── Registration ───────────────────────────────────────────────────────────
@@ -53,14 +60,18 @@ export function registerDisasmView(ctx: ExtensionContext): void {
         }),
     );
 
-    // Cursor in the source editor → scroll webview to matching instructions.
+    // Cursor in the source editor → highlight the matching instructions, and
+    // recentre the asm view on them — but ONLY when the user actually moved the
+    // cursor. A debug stop also moves it (revealing the stopped line); recentring
+    // on that fought the PC-scroll and was the stepping "jump".
     ctx.subscriptions.push(
         window.onDidChangeTextEditorSelection((e) => {
             if (!panel) return;
             if (e.textEditor.document.languageId !== 'rust') return;
             if (e.textEditor.document.uri.scheme !== 'file') return;
             const line = (e.selections[0]?.active.line ?? 0) + 1;
-            const msg: WebviewCursor = { type: 'cursor', line };
+            const scroll = Date.now() - lastStoppedAt > CURSOR_SCROLL_GRACE_MS;
+            const msg: WebviewCursor = { type: 'cursor', line, scroll };
             void panel.webview.postMessage(msg);
         }),
     );
@@ -70,6 +81,7 @@ export function registerDisasmView(ctx: ExtensionContext): void {
             return {
                 onDidSendMessage(m: { type?: string; event?: string; body?: { threadId?: number; bs_perf?: BsPerf } }) {
                     if (m.type !== 'event' || m.event !== 'stopped') return;
+                    lastStoppedAt = Date.now();   // suppress the cursor-recentre this triggers
                     void onStop(session, m.body?.threadId, m.body?.bs_perf);
                 },
             };
@@ -376,8 +388,9 @@ function webviewHtml(): string {
       } else if (data.type === 'cursor') {
         cursorLine = data.line;
         applyCursorLine();
-        // Scroll to first matching row without jarring snap.
-        scrollToRow(document.querySelector('.cursor-line'), 'center');
+        // Recentre only when the USER moved the cursor — not when a debug stop
+        // moved it (that recentre was the stepping jump).
+        if (data.scroll) scrollToRow(document.querySelector('.cursor-line'), 'center');
       }
     } catch (e) {
       // A throw in the webview JS is otherwise invisible (no console, no
