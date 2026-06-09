@@ -13,6 +13,7 @@ import {
 } from 'vscode';
 import { output } from './main';
 import { buildDisasmUpdate, propagateLines, type BsPerf } from './disasmData';
+import { explainInstruction } from './asmDescribe';
 
 // Wire types (DAP + webview) and the data-gathering live in disasmData.ts so the
 // build path is unit-testable without VS Code. This file is the glue: panel
@@ -305,6 +306,7 @@ function webviewHtml(): string {
     display: none;
   }
   #tip .tip-mnem { color: var(--vscode-debugTokenExpression-name, #9cdcfe); font-weight: 600; }
+  #tip .tip-explain { margin-top: 3px; font-family: var(--vscode-editor-font-family, monospace); color: var(--vscode-debugTokenExpression-number, #b5cea8); }
   #tip .tip-desc { margin-top: 2px; }
   #tip .tip-regs { margin-top: 5px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 4px; }
   #tip .tip-reg { white-space: nowrap; }
@@ -327,6 +329,7 @@ function webviewHtml(): string {
   let cursorLine = 0;
   let registers = {};   // live GPRs at the current stop ({ x0: "0x…", … })
   let currentPc = '';
+  let lastSig = '';     // identifies the currently-rendered instruction list
 
   window.addEventListener('message', ({ data }) => {
     try {
@@ -335,9 +338,18 @@ function webviewHtml(): string {
         currentPc = data.currentPc;
         document.getElementById('fn-name').textContent = data.fnName || '(function)';
         renderPressure(data.pressure, data.efficiency);
-        render(data.instructions, data.currentPc);
-        // Scroll to the PC row after a render.
-        scrollToRow(document.querySelector('.current-pc'));
+        // Stepping within the same function sends the same instruction list —
+        // rebuilding the whole DOM there resets scroll to the top and makes the
+        // view jump. Detect that and only move the PC highlight instead.
+        const sig = data.instructions.length + '@' +
+          (data.instructions[0] ? data.instructions[0].addr : '');
+        if (sig === lastSig) {
+          movePc(data.currentPc);                       // cheap: re-highlight + nudge
+        } else {
+          lastSig = sig;
+          render(data.instructions, data.currentPc);    // new function: full rebuild
+          scrollToRow(document.querySelector('.current-pc'));
+        }
       } else if (data.type === 'cursor') {
         cursorLine = data.line;
         applyCursorLine();
@@ -375,6 +387,7 @@ function webviewHtml(): string {
       row.dataset.srcLine = String(ins.srcLine);
       // Stash tooltip inputs on the row for the delegated hover handler.
       if (ins.desc) row.dataset.desc = ins.desc;
+      if (ins.explain) row.dataset.explain = ins.explain;
       row.dataset.regs = JSON.stringify(ins.regs || []);
       row.dataset.addr = ins.addr;
 
@@ -467,6 +480,30 @@ function webviewHtml(): string {
     if (target) target.scrollIntoView({ behavior: 'smooth', block });
   }
 
+  // Stepping within the same function: just move the current-PC highlight to the
+  // new address and nudge it into view only if it's drifted off-screen — no DOM
+  // rebuild, so the scroll position is preserved (no jump-to-top-and-back).
+  function movePc(pc) {
+    let target = null;
+    document.querySelectorAll('.row').forEach(el => {
+      const isCur = el.dataset.addr === pc;
+      el.classList.toggle('current-pc', isCur);
+      if (isCur) target = el;
+    });
+    if (target) scrollIfNeeded(target);
+  }
+
+  function scrollIfNeeded(el) {
+    // Chromium (VS Code webview) has scrollIntoViewIfNeeded — scrolls the
+    // minimum to make the row visible, nothing if it already is.
+    if (el.scrollIntoViewIfNeeded) {
+      el.scrollIntoViewIfNeeded(false);
+    } else {
+      const r = el.getBoundingClientRect();
+      if (r.top < 0 || r.bottom > window.innerHeight) el.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
   // ── Instruction tooltip ────────────────────────────────────────────────
   // Delegated hover: describe what the line does, and — only on the current
   // PC row, where the values are actually live — each operand register's
@@ -486,9 +523,13 @@ function webviewHtml(): string {
     const text = row.querySelector('.mnem');
     const mnem = text ? text.textContent : '';
     tip.appendChild(el('div', 'tip-mnem', mnem));
+    // Concrete decode first ("w8 = w8 − 1, and update the condition flags").
+    if (row.dataset.explain) {
+      tip.appendChild(el('div', 'tip-explain', row.dataset.explain));
+    }
     if (row.dataset.desc) {
       tip.appendChild(el('div', 'tip-desc', row.dataset.desc));
-    } else {
+    } else if (!row.dataset.explain) {
       tip.appendChild(el('div', 'tip-desc tip-unknown', 'No description for this instruction.'));
     }
     // Efficiency notes (expensive-op flags) — static, valid on any row.
@@ -567,4 +608,5 @@ export const _disasmTest = {
     propagateLines,
     webviewHtml,
     asmFocusShouldSend,
+    explainInstruction,
 };

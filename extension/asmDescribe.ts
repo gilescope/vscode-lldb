@@ -141,6 +141,57 @@ export function baseMnemonic(mnemonic: string): string {
     return m;
 }
 
+// ── Plain-English instruction decode ─────────────────────────────────────────
+// A concrete "what this line does" using the actual operands, so a reader who
+// doesn't know AArch64 can follow it. Key clarity: a `#N` operand is an
+// IMMEDIATE — a constant value, not a register.
+
+// Binary ALU ops of the form `op Rd, Rn, Op2` → `Rd = Rn <sym> Op2`.
+const BINOP: Readonly<Record<string, string>> = {
+    add: '+', adds: '+', sub: '−', subs: '−', mul: '×',
+    and: 'AND', ands: 'AND', orr: 'OR', eor: 'XOR', bic: 'AND NOT',
+    lsl: '<<', lsr: '>> (unsigned)', asr: '>> (signed)', ror: 'rotate-right by',
+    udiv: '÷ (unsigned)', sdiv: '÷ (signed)',
+};
+
+// Render an operand for the decode: a `#imm` becomes its bare number (so it
+// reads as the constant it is), registers/memory pass through unchanged.
+function decodeOperand(op: string): string {
+    const m = op.match(/^#(-?(?:0x[0-9a-fA-F]+|\d+))$/);
+    return m ? m[1] : op;
+}
+
+/**
+ * One-line plain-English decode for common instruction forms, or undefined for
+ * forms we don't model (the mnemonic description still shows). Uses the real
+ * operands: `subs w8, w8, #1` → "w8 = w8 − 1, and update the condition flags".
+ */
+export function explainInstruction(text: string): string | undefined {
+    const sp = text.search(/\s/);
+    if (sp < 0) return undefined;
+    const mnem = baseMnemonic(text.slice(0, sp));
+    const ops = text.slice(sp + 1).split(',').map((s) => s.trim()).filter(Boolean);
+    // `s`-suffixed ALU ops also set the N/Z/C/V condition flags.
+    const setsFlags = (mnem === 'adds' || mnem === 'subs' || mnem === 'ands')
+        ? ', and update the condition flags' : '';
+
+    if (BINOP[mnem] && ops.length >= 3 && !ops[1].includes('[')) {
+        return `${ops[0]} = ${ops[1]} ${BINOP[mnem]} ${decodeOperand(ops[2])}${setsFlags}`;
+    }
+    if ((mnem === 'mov' || mnem === 'movz') && ops.length === 2) {
+        return `${ops[0]} = ${decodeOperand(ops[1])}`;
+    }
+    if (mnem === 'mvn' && ops.length === 2) return `${ops[0]} = NOT ${decodeOperand(ops[1])}`;
+    if (mnem === 'neg' && ops.length === 2) return `${ops[0]} = −${decodeOperand(ops[1])}`;
+    if (mnem === 'cmp' && ops.length === 2) {
+        return `compare ${ops[0]} with ${decodeOperand(ops[1])} (computes ${ops[0]} − ${decodeOperand(ops[1])} and keeps only the flags)`;
+    }
+    if (mnem === 'cmn' && ops.length === 2) {
+        return `compare ${ops[0]} with −${decodeOperand(ops[1])}`;
+    }
+    return undefined;
+}
+
 /** Plain-English description for a mnemonic, or undefined if unknown. */
 export function describeMnemonic(mnemonic: string): string | undefined {
     const m = baseMnemonic(mnemonic);

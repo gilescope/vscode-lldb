@@ -21,6 +21,7 @@ interface DisasmTestApi {
     propagateLines(raw: { address: string; instruction?: string; line?: number }[]): WvInstruction[];
     webviewHtml(): string;
     asmFocusShouldSend(sessionType: string): boolean;
+    explainInstruction(text: string): string | undefined;
 }
 
 type Responses = Record<string, unknown>;
@@ -170,6 +171,29 @@ describe('disasm data-gathering', () => {
         it('does not send for unrelated session types', () => {
             assert.strictEqual(api.asmFocusShouldSend('node'), false);
             assert.strictEqual(api.asmFocusShouldSend('python'), false);
+        });
+    });
+
+    // Plain-English decode using the real operands — and a `#N` is a constant
+    // (immediate), not a register, which the decode makes obvious.
+    describe('explainInstruction', () => {
+        it('decodes subs with an immediate (the user\'s case)', () => {
+            assert.strictEqual(
+                api.explainInstruction('subs w8, w8, #1'),
+                'w8 = w8 − 1, and update the condition flags');
+        });
+        it('decodes a plain add of two registers', () => {
+            assert.strictEqual(api.explainInstruction('add x0, x1, x2'), 'x0 = x1 + x2');
+        });
+        it('decodes mov', () => {
+            assert.strictEqual(api.explainInstruction('mov x0, #5'), 'x0 = 5');
+        });
+        it('decodes cmp as a flags-only subtract', () => {
+            assert.ok((api.explainInstruction('cmp w8, #0') ?? '').startsWith('compare w8 with 0'));
+        });
+        it('returns undefined for forms it does not model', () => {
+            assert.strictEqual(api.explainInstruction('bl 0x1000'), undefined);
+            assert.strictEqual(api.explainInstruction('ret'), undefined);
         });
     });
 });
