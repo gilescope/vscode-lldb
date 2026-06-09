@@ -9,6 +9,7 @@ import {
     commands, debug, window, workspace,
     DebugAdapterTracker, DebugAdapterTrackerFactory,
     DebugSession, ExtensionContext,
+    TextEditorSelectionChangeKind,
     ViewColumn, WebviewPanel,
 } from 'vscode';
 import { output } from './main';
@@ -32,12 +33,6 @@ let currentSourcePath: string | undefined;
 let lastSession: DebugSession | undefined;
 let lastThreadId: number | undefined;
 let lastUpdateSig = '';   // signature of the last posted instruction list (diagnostic)
-// A debug stop reveals the current source line, which moves the editor cursor
-// and fires onDidChangeTextEditorSelection. That's NOT the user navigating, so
-// the asm view must not recentre on it (the smooth scroll-to-cursor was the
-// stepping "jump"). Cursor changes within this window of a stop are debug-driven.
-let lastStoppedAt = 0;
-const CURSOR_SCROLL_GRACE_MS = 300;
 let lastPc = 0;           // last PC (diagnostic: instruction-step vs line-step delta)
 
 // ── Registration ───────────────────────────────────────────────────────────
@@ -61,16 +56,18 @@ export function registerDisasmView(ctx: ExtensionContext): void {
     );
 
     // Cursor in the source editor → highlight the matching instructions, and
-    // recentre the asm view on them — but ONLY when the user actually moved the
-    // cursor. A debug stop also moves it (revealing the stopped line); recentring
-    // on that fought the PC-scroll and was the stepping "jump".
+    // recentre the asm view on them — but ONLY when the USER moved the cursor
+    // (Mouse/Keyboard). A debug stop reveals the stopped line *programmatically*
+    // (kind = Command/undefined); recentring on that fought the PC-scroll and was
+    // the stepping "jump". e.kind is race-free, unlike a timing window.
     ctx.subscriptions.push(
         window.onDidChangeTextEditorSelection((e) => {
             if (!panel) return;
             if (e.textEditor.document.languageId !== 'rust') return;
             if (e.textEditor.document.uri.scheme !== 'file') return;
             const line = (e.selections[0]?.active.line ?? 0) + 1;
-            const scroll = Date.now() - lastStoppedAt > CURSOR_SCROLL_GRACE_MS;
+            const scroll = e.kind === TextEditorSelectionChangeKind.Mouse
+                || e.kind === TextEditorSelectionChangeKind.Keyboard;
             const msg: WebviewCursor = { type: 'cursor', line, scroll };
             void panel.webview.postMessage(msg);
         }),
@@ -81,7 +78,6 @@ export function registerDisasmView(ctx: ExtensionContext): void {
             return {
                 onDidSendMessage(m: { type?: string; event?: string; body?: { threadId?: number; bs_perf?: BsPerf } }) {
                     if (m.type !== 'event' || m.event !== 'stopped') return;
-                    lastStoppedAt = Date.now();   // suppress the cursor-recentre this triggers
                     void onStop(session, m.body?.threadId, m.body?.bs_perf);
                 },
             };
