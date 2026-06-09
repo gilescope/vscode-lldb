@@ -10,7 +10,8 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 
 interface SessionLike { customRequest(command: string, args?: unknown): Promise<unknown>; }
-interface WvInstruction { text: string; srcLine: number; notes?: { severity: string; text: string }[] }
+interface OperandReg { name: string; reg: string; width: number }
+interface WvInstruction { text: string; srcLine: number; notes?: { severity: string; text: string }[]; regs?: OperandReg[] }
 interface BuildResult {
     update?: { instructions: WvInstruction[]; fnName: string; pressure: { nInstr: number }; efficiency?: unknown };
     skip?: string;
@@ -118,6 +119,26 @@ describe('disasm data-gathering', () => {
         assert.strictEqual(rows.length, 2);
         assert.strictEqual(rows[1].text, '');
         assert.strictEqual(rows[1].srcLine, 5, 'inherits the last source line');
+    });
+
+    // A `w8` operand must be reported AS `w8` (mapped to the 64-bit x8 for the
+    // register-value lookup, width 32) — not silently shown as `x8` with the
+    // full 64-bit value, which misreads `tbnz w8, #0` as testing x8.
+    it('keeps w-register operands as-written (w8 → x8, width 32)', () => {
+        const rows = api.propagateLines([
+            { address: '0x1000', instruction: 'tbnz w8, #0, #0x100008334', line: 5 },
+        ]);
+        assert.deepStrictEqual(rows[0].regs, [{ name: 'w8', reg: 'x8', width: 32 }]);
+    });
+
+    it('keeps x-register operands full-width', () => {
+        const rows = api.propagateLines([
+            { address: '0x1000', instruction: 'ldr x8, [sp, #16]', line: 5 },
+        ]);
+        assert.deepStrictEqual(rows[0].regs, [
+            { name: 'x8', reg: 'x8', width: 64 },
+            { name: 'sp', reg: 'sp', width: 64 },
+        ]);
     });
 
     // Regression: the inlined webview JS lives inside an HTML *template literal*,

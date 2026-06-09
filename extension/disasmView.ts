@@ -310,6 +310,7 @@ function webviewHtml(): string {
   #tip .tip-reg { white-space: nowrap; }
   #tip .tip-reg .r { color: var(--vscode-debugTokenExpression-name, #9cdcfe); }
   #tip .tip-reg .v { color: var(--vscode-debugTokenExpression-number, #b5cea8); }
+  #tip .tip-regnote { opacity: 0.6; font-style: italic; margin-left: 0.5ch; }
   #tip .tip-unknown { font-style: italic; opacity: 0.7; }
   #tip .tip-note { margin-top: 5px; border-top: 1px solid rgba(128,128,128,0.25); padding-top: 4px; }
   #tip .tip-note.warn { color: #e0af68; }
@@ -496,18 +497,29 @@ function webviewHtml(): string {
     for (const nt of notes) {
       tip.appendChild(el('div', 'tip-note ' + (nt.severity || 'info'), nt.text));
     }
-    // Live operand values: current PC row only.
+    // Live operand values: current PC row only. Each operand is
+    // { name, reg, width }: name is as-written (e.g. "w8"), reg is the 64-bit
+    // key into the register map ("x8"), width is 32 for a "w" view. A "w"
+    // register is the LOW 32 BITS of its "x" — show that, not the full 64-bit
+    // value, and say so, so "tbnz w8, #0" doesn't look like it's testing x8.
     if (row.dataset.addr === currentPc) {
       let regs = [];
       try { regs = JSON.parse(row.dataset.regs || '[]'); } catch (e) {}
-      const have = regs.filter(r => registers[r] !== undefined);
+      const have = regs.filter(o => o && registers[o.reg] !== undefined);
       if (have.length) {
         const box = el('div', 'tip-regs');
-        for (const r of have) {
+        for (const o of have) {
+          const full = registers[o.reg];
+          let value = full, note = '';
+          if (o.width === 32) {
+            try { value = '0x' + (BigInt(full) & 0xffffffffn).toString(16); } catch (e) { value = full; }
+            note = ' (low 32 bits of ' + o.reg + ')';
+          }
           const line = el('div', 'tip-reg');
-          line.appendChild(el('span', 'r', r));
+          line.appendChild(el('span', 'r', o.name));
           line.appendChild(document.createTextNode(' = '));
-          line.appendChild(el('span', 'v', registers[r]));
+          line.appendChild(el('span', 'v', value));
+          if (note) line.appendChild(el('span', 'tip-regnote', note));
           box.appendChild(line);
         }
         tip.appendChild(box);

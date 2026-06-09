@@ -5,7 +5,7 @@
 // renders — or returns an explicit `skip` reason so a blank panel is always
 // diagnosable instead of failing silently.
 
-import { describeMnemonic, operandRegisters } from './asmDescribe';
+import { describeMnemonic, operandRegisters, type OperandReg } from './asmDescribe';
 import {
     lineNotes, portPressure, measuredEfficiency,
     type EfficiencyNote, type PortPressure, type MeasuredEfficiency,
@@ -46,7 +46,7 @@ export interface WvInstruction {
     text: string;       // mnemonic + operands (no address)
     addr: string;       // normalised hex, for PC comparison
     desc?: string;      // plain-English description of the mnemonic (static)
-    regs?: string[];    // operand register names (64-bit form), in source order
+    regs?: OperandReg[]; // operand registers (as-written name + 64-bit key + width)
     notes?: EfficiencyNote[]; // per-line efficiency flags (expensive ops)
 }
 

@@ -92,8 +92,8 @@ const ARM64_MNEMONICS: Readonly<Record<string, string>> = {
     ret: 'Return from a function (jump to the address in x30).',
     cbz: 'Branch if a register is zero.',
     cbnz: 'Branch if a register is non-zero.',
-    tbz: 'Branch if a specific bit is zero.',
-    tbnz: 'Branch if a specific bit is non-zero.',
+    tbz: 'Branch if a bit is zero — the `#N` operand is the bit index in the register (e.g. `tbz w8, #0` tests bit 0).',
+    tbnz: 'Branch if a bit is non-zero — the `#N` operand is the bit index in the register (e.g. `tbnz w8, #0` tests bit 0).',
     csel: 'Conditional select — pick one of two registers based on the flags (a branchless if).',
     cset: 'Set a register to 1 or 0 based on a condition (branchless boolean).',
     csinc: 'Conditional select-increment.',
@@ -153,20 +153,33 @@ export function describeMnemonic(mnemonic: string): string | undefined {
 // ── Operand register extraction ──────────────────────────────────────────────
 
 // Match arm64 GPR operands: x0–x30, w0–w30, sp, plus the zero registers.
-// Returned in source order, de-duplicated, normalised to the 64-bit name so
-// they key into the bs/registers map (w3 → x3, wzr/xzr dropped).
 const REG_TOKEN = /\b(x(?:[12]?\d|30)|w(?:[12]?\d|30)|sp|xzr|wzr)\b/gi;
 
-/** Distinct 64-bit register names referenced by an operand string, in order. */
-export function operandRegisters(text: string): string[] {
+/** An operand register: `name` exactly as written (`w8`, `x8`, `sp`), and `reg`,
+ *  the 64-bit name it keys into the bs/registers map by (`w8`→`x8`). `width` is
+ *  32 for a `w` view, else 64 — a `w` register is the low 32 bits of its `x`. */
+export interface OperandReg {
+    name: string;
+    reg: string;
+    width: 32 | 64;
+}
+
+/** Distinct registers referenced by an operand string, in source order,
+ *  preserving the as-written form (so a `w8` operand shows as `w8`, not `x8`). */
+export function operandRegisters(text: string): OperandReg[] {
     const ops = text.slice(text.search(/\s/) + 1); // drop the mnemonic
     const seen = new Set<string>();
-    const out: string[] = [];
+    const out: OperandReg[] = [];
     for (const match of ops.matchAll(REG_TOKEN)) {
-        let r = match[1].toLowerCase();
-        if (r === 'xzr' || r === 'wzr') continue; // always zero, not interesting
-        if (r.startsWith('w')) r = 'x' + r.slice(1); // w3 and x3 share the map key
-        if (!seen.has(r)) { seen.add(r); out.push(r); }
+        const name = match[1].toLowerCase();
+        if (name === 'xzr' || name === 'wzr') continue; // always zero, not interesting
+        if (seen.has(name)) continue;
+        seen.add(name);
+        if (name.startsWith('w')) {
+            out.push({ name, reg: 'x' + name.slice(1), width: 32 });
+        } else {
+            out.push({ name, reg: name, width: 64 });
+        }
     }
     return out;
 }
@@ -176,8 +189,19 @@ export function operandRegisters(text: string): string[] {
 export interface AsmTooltip {
     mnemonic: string;
     description?: string;          // undefined for unknown mnemonics
-    /** Live operand values, when the debugger supplied registers (current PC). */
-    operands: Array<{ reg: string; value: string }>;
+    /** Live operand values, when the debugger supplied registers (current PC).
+     *  `name` is as-written (`w8`); `value` is the value of that view (32-bit
+     *  masked for a `w` register). */
+    operands: Array<{ name: string; value: string }>;
+}
+
+/** Low 32 bits of a 64-bit `0x…` value string, as a `0x…` string. */
+export function low32(hexValue: string): string {
+    try {
+        return '0x' + (BigInt(hexValue) & 0xffffffffn).toString(16);
+    } catch {
+        return hexValue;
+    }
 }
 
 /**
@@ -193,9 +217,10 @@ export function describeInstruction(
     const mnemonic = sp >= 0 ? text.slice(0, sp) : text;
     const operands: AsmTooltip['operands'] = [];
     if (regs) {
-        for (const reg of operandRegisters(text)) {
-            const value = regs[reg];
-            if (value !== undefined) operands.push({ reg, value });
+        for (const op of operandRegisters(text)) {
+            const full = regs[op.reg];
+            if (full === undefined) continue;
+            operands.push({ name: op.name, value: op.width === 32 ? low32(full) : full });
         }
     }
     return { mnemonic, description: describeMnemonic(mnemonic), operands };
