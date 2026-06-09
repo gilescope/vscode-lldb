@@ -32,13 +32,6 @@ let lastSession: DebugSession | undefined;
 let lastThreadId: number | undefined;
 let lastUpdateSig = '';   // signature of the last posted instruction list (diagnostic)
 let lastPc = 0;           // last PC (diagnostic: instruction-step vs line-step delta)
-// Timestamp of the last stopped event. A debug step reveals the source line and
-// momentarily steals focus from the asm pane; if the pane goes inactive within
-// this window of a stop, we treat it as that reveal (not the user leaving) and
-// keep the adapter's instruction-step flag set — without grabbing focus back,
-// which was causing a visible jump.
-let lastStoppedAt = 0;
-const FOCUS_GRACE_MS = 250;
 
 // ── Registration ───────────────────────────────────────────────────────────
 
@@ -77,7 +70,6 @@ export function registerDisasmView(ctx: ExtensionContext): void {
             return {
                 onDidSendMessage(m: { type?: string; event?: string; body?: { threadId?: number; bs_perf?: BsPerf } }) {
                     if (m.type !== 'event' || m.event !== 'stopped') return;
-                    lastStoppedAt = Date.now();   // for the focus-grace window
                     void onStop(session, m.body?.threadId, m.body?.bs_perf);
                 },
             };
@@ -102,21 +94,21 @@ function ensurePanelOpen(): void {
         { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [], enableFindWidget: true },
     );
     panel.webview.html = webviewHtml();
+    // Instruction-stepping is tied to the asm pane being VISIBLE, not focused.
+    // A step reveals the source line and pulls keyboard focus there, but the pane
+    // stays visible and you're still walking the assembly — so keep stepping at
+    // instruction granularity. Focus is too fragile (the first step before you
+    // click the pane would be a line step). Hidden/closed → back to line steps.
     panel.onDidChangeViewState((e) => {
-        const active = e.webviewPanel.active;
-        // A debug step reveals the source line and momentarily steals focus from
-        // the asm pane. Don't read that as "left the asm pane" — keep the
-        // adapter's instruction-step flag set (next F10/F11 stays per-instruction)
-        // and don't fight it visually (no reveal → no focus ping-pong jump). A
-        // genuine click elsewhere — not within the grace window of a stop — still
-        // clears it.
-        if (!active && Date.now() - lastStoppedAt < FOCUS_GRACE_MS) return;
-        sendAsmFocus(debug.activeDebugSession, active);
+        sendAsmFocus(debug.activeDebugSession, e.webviewPanel.visible);
     });
     panel.onDidDispose(() => {
         sendAsmFocus(debug.activeDebugSession, false);
         panel = undefined;
     });
+    // The panel is visible from creation, so flag instruction-stepping now —
+    // onDidChangeViewState may not fire for the initial show.
+    sendAsmFocus(debug.activeDebugSession, panel.visible);
     // If we open (or reopen after a window reload) while already paused, render
     // the current stop now — otherwise the panel sits blank until the next step.
     void renderCurrent();
