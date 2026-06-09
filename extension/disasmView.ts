@@ -34,6 +34,7 @@ let lastThreadId: number | undefined;
 // stopped event arrives, before VS Code reveals the source line and steals
 // focus. Drives focus-reclaim so instruction-stepping stays in the asm pane.
 let asmPanelActive = false;
+let lastUpdateSig = '';   // signature of the last posted instruction list (diagnostic)
 
 // ── Registration ───────────────────────────────────────────────────────────
 
@@ -151,6 +152,12 @@ async function onStop(session: DebugSession, threadId: number | undefined, perf?
         output.appendLine(`[disasm] no render: ${result.skip}`);
         return;
     }
+    // Diagnostic: did the instruction list change (full webview rebuild) or is
+    // this a same-function step (cheap PC move)? A "rebuild" every step would
+    // explain residual scroll jumpiness.
+    const sig = result.update.instructions.length + '@' + (result.update.instructions[0]?.addr ?? '');
+    output.appendLine(`[disasm] ${sig === lastUpdateSig ? 'same fn (move PC)' : 'new fn (rebuild)'} pc=${result.update.currentPc}`);
+    lastUpdateSig = sig;
     void panel.webview.postMessage(result.update);
 }
 
@@ -380,7 +387,7 @@ function webviewHtml(): string {
         } else {
           lastSig = sig;
           render(data.instructions, data.currentPc);    // new function: full rebuild
-          scrollToRow(document.querySelector('.current-pc'));
+          keepPcVisible();
         }
       } else if (data.type === 'cursor') {
         cursorLine = data.line;
@@ -516,23 +523,30 @@ function webviewHtml(): string {
   // new address and nudge it into view only if it's drifted off-screen — no DOM
   // rebuild, so the scroll position is preserved (no jump-to-top-and-back).
   function movePc(pc) {
-    let target = null;
     document.querySelectorAll('.row').forEach(el => {
-      const isCur = el.dataset.addr === pc;
-      el.classList.toggle('current-pc', isCur);
-      if (isCur) target = el;
+      el.classList.toggle('current-pc', el.dataset.addr === pc);
     });
-    if (target) scrollIfNeeded(target);
+    keepPcVisible();
   }
 
-  function scrollIfNeeded(el) {
-    // Chromium (VS Code webview) has scrollIntoViewIfNeeded — scrolls the
-    // minimum to make the row visible, nothing if it already is.
-    if (el.scrollIntoViewIfNeeded) {
-      el.scrollIntoViewIfNeeded(false);
-    } else {
-      const r = el.getBoundingClientRect();
-      if (r.top < 0 || r.bottom > window.innerHeight) el.scrollIntoView({ block: 'nearest' });
+  // Editor-style "scrolloff": keep the current-PC row inside a comfortable band,
+  // never jammed against the top/bottom edge (and never hidden under the sticky
+  // header bars). Only scrolls when the PC leaves the band, so stepping reads as
+  // the highlight gliding, with context above and below — no jump-to-edge.
+  function keepPcVisible() {
+    const row = document.querySelector('.current-pc');
+    if (!row) return;
+    const fn = document.getElementById('fn-name');
+    const pr = document.getElementById('pressure');
+    const headerH = (fn ? fn.offsetHeight : 0) + (pr ? pr.offsetHeight : 0);
+    const r = row.getBoundingClientRect();
+    const margin = Math.max(40, r.height * 4);     // ~4 rows of context
+    const bandTop = headerH + margin;
+    const bandBottom = window.innerHeight - margin;
+    if (r.top < bandTop) {
+      window.scrollBy(0, r.top - bandTop);         // PC near/above the top → scroll up
+    } else if (r.bottom > bandBottom) {
+      window.scrollBy(0, r.bottom - bandBottom);   // PC near/below the bottom → scroll down
     }
   }
 
