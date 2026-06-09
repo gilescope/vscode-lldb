@@ -21,6 +21,8 @@ interface DisasmTestApi {
     propagateLines(raw: { address: string; instruction?: string; line?: number }[]): WvInstruction[];
     webviewHtml(): string;
     asmFocusShouldSend(sessionType: string): boolean;
+    isUserCursorMove(kind: vscode.TextEditorSelectionChangeKind | undefined): boolean;
+    viewStateStepMode(active: boolean, visible: boolean): 'instruction' | 'line' | 'unchanged';
     explainInstruction(text: string): string | undefined;
 }
 
@@ -172,6 +174,52 @@ describe('disasm data-gathering', () => {
             assert.strictEqual(api.asmFocusShouldSend('node'), false);
             assert.strictEqual(api.asmFocusShouldSend('python'), false);
         });
+    });
+
+    // The whole step-mode / cursor-recentre design rests on one rule: react to
+    // USER cursor moves, ignore the debugger's programmatic source reveals.
+    describe('isUserCursorMove (recentre + line-step gate)', () => {
+        const K = vscode.TextEditorSelectionChangeKind;
+        it('true for a mouse click', () => assert.strictEqual(api.isUserCursorMove(K.Mouse), true));
+        it('true for keyboard navigation', () => assert.strictEqual(api.isUserCursorMove(K.Keyboard), true));
+        it('false for a Command-kind move (debug reveal)', () => assert.strictEqual(api.isUserCursorMove(K.Command), false));
+        it('false for an undefined kind (programmatic)', () => assert.strictEqual(api.isUserCursorMove(undefined), false));
+    });
+
+    describe('viewStateStepMode', () => {
+        it('active pane (user clicked it) → instruction', () => {
+            assert.strictEqual(api.viewStateStepMode(true, true), 'instruction');
+        });
+        it('hidden pane → line', () => {
+            assert.strictEqual(api.viewStateStepMode(false, false), 'line');
+        });
+        it('inactive but visible (debug reveal) → unchanged — keeps instruction-stepping', () => {
+            assert.strictEqual(api.viewStateStepMode(false, true), 'unchanged');
+        });
+    });
+
+    // The load-bearing ASSUMPTION, verified against real VS Code: setting a
+    // selection programmatically (which is exactly what a debug stop's source
+    // reveal does) does NOT report kind Mouse/Keyboard — so isUserCursorMove is
+    // false for it, and stepping won't recentre or flip to line-stepping.
+    it('a programmatic selection change is not reported as a user move', async () => {
+        const doc = await vscode.workspace.openTextDocument({ language: 'rust', content: 'fn main() {\n    let x = 1;\n    let y = 2;\n}\n' });
+        const editor = await vscode.window.showTextDocument(doc);
+        const seen: (vscode.TextEditorSelectionChangeKind | undefined)[] = [];
+        const sub = vscode.window.onDidChangeTextEditorSelection((e) => {
+            if (e.textEditor === editor) seen.push(e.kind);
+        });
+        try {
+            editor.selection = new vscode.Selection(2, 0, 2, 0);   // programmatic move
+            await new Promise((r) => setTimeout(r, 50));
+            assert.ok(seen.length > 0, 'selection change should have fired');
+            for (const k of seen) {
+                assert.ok(!api.isUserCursorMove(k),
+                    `programmatic selection reported as user move (kind=${k}); the stepping fix relies on this being false`);
+            }
+        } finally {
+            sub.dispose();
+        }
     });
 
     // Plain-English decode using the real operands — and a `#N` is a constant

@@ -66,8 +66,7 @@ export function registerDisasmView(ctx: ExtensionContext): void {
             if (e.textEditor.document.languageId !== 'rust') return;
             if (e.textEditor.document.uri.scheme !== 'file') return;
             const line = (e.selections[0]?.active.line ?? 0) + 1;
-            const userMoved = e.kind === TextEditorSelectionChangeKind.Mouse
-                || e.kind === TextEditorSelectionChangeKind.Keyboard;
+            const userMoved = isUserCursorMove(e.kind);
             // A real interaction with the source editor = "working in source" →
             // line-step. (A debug stop's programmatic reveal is kind Command/
             // undefined and must NOT flip us out of instruction-stepping.)
@@ -116,11 +115,9 @@ function ensurePanelOpen(): void {
     // Clicking/typing in the source editor flips back to line-step (see the
     // onDidChangeTextEditorSelection handler).
     panel.onDidChangeViewState((e) => {
-        if (e.webviewPanel.active) {
-            sendAsmFocus(debug.activeDebugSession, true);
-        } else if (!e.webviewPanel.visible) {
-            sendAsmFocus(debug.activeDebugSession, false);
-        }
+        const mode = viewStateStepMode(e.webviewPanel.active, e.webviewPanel.visible);
+        if (mode === 'instruction') sendAsmFocus(debug.activeDebugSession, true);
+        else if (mode === 'line') sendAsmFocus(debug.activeDebugSession, false);
     });
     panel.onDidDispose(() => {
         sendAsmFocus(debug.activeDebugSession, false);
@@ -204,6 +201,27 @@ function sendAsmFocus(session: DebugSession | undefined, focused: boolean): void
  *  codelens launches) — matching every other session-type check in this file. */
 export function asmFocusShouldSend(sessionType: string): boolean {
     return sessionType === 'bugstalker' || sessionType === 'lldb';
+}
+
+/** True only when the USER moved the source cursor (click / arrow keys), as
+ *  opposed to a programmatic move — e.g. a debug stop revealing the stopped
+ *  line. The two things we do on a user move (recentre the asm view, switch to
+ *  line-stepping) must NOT happen on the debugger's own reveals. */
+export function isUserCursorMove(kind: TextEditorSelectionChangeKind | undefined): boolean {
+    return kind === TextEditorSelectionChangeKind.Mouse
+        || kind === TextEditorSelectionChangeKind.Keyboard;
+}
+
+/** Stepping mode implied by an asm-panel view-state change:
+ *  - active (user clicked the pane)        → 'instruction'
+ *  - hidden (not visible)                  → 'line'
+ *  - inactive but still visible            → 'unchanged' (a debug stop revealed
+ *    the source line and deactivated the pane; that is NOT the user leaving, so
+ *    continuous instruction-stepping must survive it). */
+export function viewStateStepMode(active: boolean, visible: boolean): 'instruction' | 'line' | 'unchanged' {
+    if (active) return 'instruction';
+    if (!visible) return 'line';
+    return 'unchanged';
 }
 
 // ── Instruction-step relay ─────────────────────────────────────────────────
@@ -669,5 +687,7 @@ export const _disasmTest = {
     propagateLines,
     webviewHtml,
     asmFocusShouldSend,
+    isUserCursorMove,
+    viewStateStepMode,
     explainInstruction,
 };
