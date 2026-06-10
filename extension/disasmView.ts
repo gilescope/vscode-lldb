@@ -109,6 +109,10 @@ function ensurePanelOpen(): void {
         { enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [], enableFindWidget: true },
     );
     panel.webview.html = webviewHtml();
+    // Webview diagnostics → output channel (scroll motion is invisible otherwise).
+    panel.webview.onDidReceiveMessage((m: { type?: string; m?: string }) => {
+        if (m?.type === 'diag') output.appendLine(`[asm-web] ${m.m}`);
+    });
     // Instruction-stepping = "the user is working in the asm pane". Driven by
     // USER intent only, never programmatic focus moves:
     //   • user clicks the pane (active) → instruction-step
@@ -396,6 +400,22 @@ function webviewHtml(): string {
 <div id="tip"></div>
 <script>
 (function() {
+  // Diagnostics back-channel: the extension logs these to the output channel.
+  // The webview's scroll motion is otherwise invisible from outside.
+  const vsapi = acquireVsCodeApi();
+  const diag = (m) => vsapi.postMessage({ type: 'diag', m });
+  // Log every actual scroll of the pane (rAF-debounced) — this is the ground
+  // truth for "what jumped", whatever code caused it.
+  let scrollPending = false;
+  window.addEventListener('scroll', () => {
+    if (scrollPending) return;
+    scrollPending = true;
+    requestAnimationFrame(() => {
+      scrollPending = false;
+      diag('scrolled to y=' + Math.round(window.scrollY) + ' vh=' + window.innerHeight);
+    });
+  });
+
   let cursorLine = 0;
   let registers = {};   // live GPRs at the current stop ({ x0: "0x…", … })
   let currentPc = '';
@@ -579,6 +599,7 @@ function webviewHtml(): string {
   // screen of runway before the next scroll (rare repositions, not constant
   // nudging). Stepping forward marches down; backward retreats into rows that
   // are already on screen, so backward rarely triggers this at all.
+  let pendingPcScroll = false;   // geometry was zero (hidden/pre-layout) — retry when real
   function keepPcVisible() {
     if (!pcRow) return;
     const fn = document.getElementById('fn-name');
@@ -586,6 +607,22 @@ function webviewHtml(): string {
     const headerH = (fn ? fn.offsetHeight : 0) + (pr ? pr.offsetHeight : 0);
     const runway = window.innerHeight * 0.15;     // land 15% from the edge
     const r = pcRow.getBoundingClientRect();
+    // A hidden or not-yet-laid-out webview reports all-zero geometry. Deciding
+    // "PC is visible, no scroll needed" off that is a lie — the postponed scroll
+    // then fires on the NEXT update (= the first step), which is the jump.
+    // Defer instead and re-run when geometry becomes real.
+    if (window.innerHeight === 0 || (r.top === 0 && r.bottom === 0 && r.height === 0)) {
+      pendingPcScroll = true;
+      diag('keepPcVisible: zero geometry (hidden/pre-layout) — scroll deferred');
+      return;
+    }
+    pendingPcScroll = false;
+    const why = r.bottom > window.innerHeight ? 'pc below fold → scroll fwd'
+              : r.top < headerH               ? 'pc above header → scroll back'
+              : 'pc visible → no scroll';
+    diag('keepPcVisible: rect=' + Math.round(r.top) + '..' + Math.round(r.bottom)
+       + ' vh=' + window.innerHeight + ' headerH=' + headerH
+       + ' y=' + Math.round(window.scrollY) + ' — ' + why);
     if (r.bottom > window.innerHeight) {
       // stepping forward off the bottom → put the PC near the top
       pcRow.style.scrollMarginTop = (headerH + runway) + 'px';
@@ -596,6 +633,13 @@ function webviewHtml(): string {
       pcRow.scrollIntoView({ block: 'end' });
     }
   }
+  // Run the deferred positioning as soon as the pane can actually measure.
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && pendingPcScroll) { diag('visible → deferred keepPcVisible'); keepPcVisible(); }
+  });
+  window.addEventListener('resize', () => {
+    if (pendingPcScroll) { diag('resize → deferred keepPcVisible'); keepPcVisible(); }
+  });
 
   // ── Instruction tooltip ────────────────────────────────────────────────
   // Delegated hover: describe what the line does, and — only on the current
