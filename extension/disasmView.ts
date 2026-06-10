@@ -403,7 +403,9 @@ function webviewHtml(): string {
   // Diagnostics back-channel: the extension logs these to the output channel.
   // The webview's scroll motion is otherwise invisible from outside.
   const vsapi = acquireVsCodeApi();
-  const diag = (m) => vsapi.postMessage({ type: 'diag', m });
+  // performance.now()-stamped so timer-driven causes (the drift starts ~5s
+  // after a stop, both runs) line up across the log.
+  const diag = (m) => vsapi.postMessage({ type: 'diag', m: 't+' + (performance.now() / 1000).toFixed(2) + 's ' + m });
   // Log every actual scroll of the pane (rAF-debounced) — this is the ground
   // truth for "what jumped", whatever code caused it.
   let scrollPending = false;
@@ -442,6 +444,45 @@ function webviewHtml(): string {
     diag('window.scrollBy(' + JSON.stringify(a) + ')');
     return sbyOrig(...a);
   };
+  // The drift dodged scrollTo/scrollBy/scrollIntoView/wheel. Remaining ways to
+  // move scrollY, all wrapped with caller stacks: window.scroll (an alias,
+  // NOT the same property as scrollTo), the scrollTop setter (a per-frame
+  // "scrollTop +=" rAF loop matches the observed ease curve + re-targeting),
+  // and webkit's scrollIntoViewIfNeeded. Plus keydown: Chromium's keyboard
+  // scrolling (space/arrows/PageDown) is animated and fires no wheel events.
+  const sOrig = window.scroll.bind(window);
+  window.scroll = function (...a) {
+    diag('window.scroll(' + JSON.stringify(a) + ') from ' + ((new Error().stack || '').split('\\n')[2] || '?').trim());
+    return sOrig(...a);
+  };
+  for (const proto of [Element.prototype]) {
+    const d = Object.getOwnPropertyDescriptor(proto, 'scrollTop');
+    if (d && d.set) {
+      let logs = 0;
+      Object.defineProperty(proto, 'scrollTop', {
+        get: d.get,
+        set(v) {
+          if (logs++ < 40) {
+            diag('scrollTop=' + Math.round(v) + ' on <' + (this.className || this.tagName)
+               + '> from ' + ((new Error().stack || '').split('\\n')[2] || '?').trim());
+          }
+          d.set.call(this, v);
+        },
+      });
+    }
+  }
+  if (Element.prototype.scrollIntoViewIfNeeded) {
+    const sivnOrig = Element.prototype.scrollIntoViewIfNeeded;
+    Element.prototype.scrollIntoViewIfNeeded = function (...a) {
+      diag('scrollIntoViewIfNeeded <' + (this.className || this.tagName) + '> from '
+         + ((new Error().stack || '').split('\\n')[2] || '?').trim());
+      return sivnOrig.apply(this, a);
+    };
+  }
+  window.addEventListener('keydown', (e) => {
+    diag('keydown key=' + e.key + ' code=' + e.code + ' target=<'
+       + (e.target && (e.target.className || e.target.tagName) || '?') + '>');
+  }, { passive: true, capture: true });
 
   let cursorLine = 0;
   let registers = {};   // live GPRs at the current stop ({ x0: "0x…", … })
