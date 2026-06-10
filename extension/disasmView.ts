@@ -67,10 +67,6 @@ export function registerDisasmView(ctx: ExtensionContext): void {
             if (e.textEditor.document.uri.scheme !== 'file') return;
             const line = (e.selections[0]?.active.line ?? 0) + 1;
             const userMoved = isUserCursorMove(e.kind);
-            // Diagnostic: what kind does the REAL debug-stop reveal fire? (My
-            // proof tested editor.selection=…, which may differ from VS Code's
-            // own reveal.) If this logs Mouse/Keyboard on a step, the gate fails.
-            output.appendLine(`[disasm] cursor kind=${e.kind} line=${line} userMoved=${userMoved}`);
             // A real interaction with the source editor = "working in source" →
             // line-step. (A debug stop's programmatic reveal is kind Command/
             // undefined and must NOT flip us out of instruction-stepping.)
@@ -124,18 +120,8 @@ function ensurePanelOpen(): void {
     // onDidChangeTextEditorSelection handler).
     panel.onDidChangeViewState((e) => {
         const mode = viewStateStepMode(e.webviewPanel.active, e.webviewPanel.visible);
-        if (mode === 'instruction') {
-            sendAsmFocus(debug.activeDebugSession, true);
-            // Experiment (user's idea): a real step "corrects" the view because
-            // its stopped event re-renders the asm pane. Replicate that here — a
-            // "no-op step" — when the user focuses the pane: re-fetch + re-render
-            // the CURRENT stop, no debugger movement. If this corrects the drift,
-            // the bug is that normal stepping doesn't reposition the PC.
-            output.appendLine('[disasm] focus gained → renderCurrent (no-op step)');
-            void renderCurrent();
-        } else if (mode === 'line') {
-            sendAsmFocus(debug.activeDebugSession, false);
-        }
+        if (mode === 'instruction') sendAsmFocus(debug.activeDebugSession, true);
+        else if (mode === 'line') sendAsmFocus(debug.activeDebugSession, false);
     });
     panel.onDidDispose(() => {
         sendAsmFocus(debug.activeDebugSession, false);
@@ -403,94 +389,20 @@ function webviewHtml(): string {
   // Diagnostics back-channel: the extension logs these to the output channel.
   // The webview's scroll motion is otherwise invisible from outside.
   const vsapi = acquireVsCodeApi();
-  // performance.now()-stamped so timer-driven causes (the drift starts ~5s
-  // after a stop, both runs) line up across the log.
-  const diag = (m) => vsapi.postMessage({ type: 'diag', m: 't+' + (performance.now() / 1000).toFixed(2) + 's ' + m });
-  // Log every actual scroll of the pane (rAF-debounced) — this is the ground
-  // truth for "what jumped", whatever code caused it.
-  let scrollPending = false;
-  window.addEventListener('scroll', () => {
-    if (scrollPending) return;
-    scrollPending = true;
-    requestAnimationFrame(() => {
-      scrollPending = false;
-      diag('scrolled to y=' + Math.round(window.scrollY) + ' vh=' + window.innerHeight);
-    });
-  });
-  // Initiator attribution: the pane drifted ~450px before a step with no code
-  // path that could do it. Distinguish user wheel/trackpad (momentum fires
-  // wheel events) from programmatic scrolls (caught by wrapping the APIs).
-  let wheelCount = 0;
-  window.addEventListener('wheel', (e) => {
-    wheelCount++;
-    if (wheelCount === 1 || wheelCount % 20 === 0) {
-      diag('wheel #' + wheelCount + ' dy=' + Math.round(e.deltaY) + ' (user scroll input)');
-    }
-  }, { passive: true });
-  const sivOrig = Element.prototype.scrollIntoView;
-  Element.prototype.scrollIntoView = function (opts) {
-    const at = (new Error().stack || '').split('\\n')[2] || '?';
-    diag('scrollIntoView <' + (this.className || this.tagName) + '> '
-       + JSON.stringify(opts) + ' from ' + at.trim());
-    return sivOrig.call(this, opts);
-  };
-  const stoOrig = window.scrollTo.bind(window);
-  window.scrollTo = function (...a) {
-    diag('window.scrollTo(' + JSON.stringify(a) + ')');
-    return stoOrig(...a);
-  };
-  const sbyOrig = window.scrollBy.bind(window);
-  window.scrollBy = function (...a) {
-    diag('window.scrollBy(' + JSON.stringify(a) + ')');
-    return sbyOrig(...a);
-  };
-  // The drift dodged scrollTo/scrollBy/scrollIntoView/wheel. Remaining ways to
-  // move scrollY, all wrapped with caller stacks: window.scroll (an alias,
-  // NOT the same property as scrollTo), the scrollTop setter (a per-frame
-  // "scrollTop +=" rAF loop matches the observed ease curve + re-targeting),
-  // and webkit's scrollIntoViewIfNeeded. Plus keydown: Chromium's keyboard
-  // scrolling (space/arrows/PageDown) is animated and fires no wheel events.
-  const sOrig = window.scroll.bind(window);
-  window.scroll = function (...a) {
-    diag('window.scroll(' + JSON.stringify(a) + ') from ' + ((new Error().stack || '').split('\\n')[2] || '?').trim());
-    return sOrig(...a);
-  };
-  for (const proto of [Element.prototype]) {
-    const d = Object.getOwnPropertyDescriptor(proto, 'scrollTop');
-    if (d && d.set) {
-      let logs = 0;
-      Object.defineProperty(proto, 'scrollTop', {
-        get: d.get,
-        set(v) {
-          if (logs++ < 40) {
-            diag('scrollTop=' + Math.round(v) + ' on <' + (this.className || this.tagName)
-               + '> from ' + ((new Error().stack || '').split('\\n')[2] || '?').trim());
-          }
-          d.set.call(this, v);
-        },
-      });
-    }
-  }
-  if (Element.prototype.scrollIntoViewIfNeeded) {
-    const sivnOrig = Element.prototype.scrollIntoViewIfNeeded;
-    Element.prototype.scrollIntoViewIfNeeded = function (...a) {
-      diag('scrollIntoViewIfNeeded <' + (this.className || this.tagName) + '> from '
-         + ((new Error().stack || '').split('\\n')[2] || '?').trim());
-      return sivnOrig.apply(this, a);
-    };
-  }
+  const diag = (m) => vsapi.postMessage({ type: 'diag', m });
+
   // THE stepping-jump fix. A step keybinding that contains a scroll key (the
   // user's is ⌥↓) reaches the webview DOM as well as VS Code's keybinding
   // service: VS Code performs the step AND Chromium performs its default
-  // action — an animated page-scroll of the pane (no wheel events, no JS
-  // scroll APIs, hence invisible to every wrap above). keepPcVisible then
-  // snaps back: page-down + snap-back = the jump. The pane has no keyboard
-  // UI, so suppress the default scroll action outright; VS Code still gets
-  // the keybinding (the webview host forwards a cloned event regardless).
+  // action — an animated page-scroll of the pane. It fires no wheel events
+  // and no JS scroll APIs, so it is invisible to scroll-API monkeypatches —
+  // only a keydown probe catches it. keepPcVisible then snaps the PC back:
+  // page-down + snap-back was the jump. The pane has no keyboard UI, so
+  // suppress the default scroll action outright; VS Code still gets the
+  // keybinding (the webview host forwards a cloned event regardless).
+  // NB: must NOT be a passive listener — passive makes preventDefault a no-op.
   const scrollKeys = ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' '];
   window.addEventListener('keydown', (e) => {
-    diag('keydown key=' + e.key + ' code=' + e.code + ' target=<'
-       + (e.target && (e.target.className || e.target.tagName) || '?') + '>');
     const editable = e.target && (e.target.isContentEditable
       || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
     if (!editable && scrollKeys.indexOf(e.key) >= 0) e.preventDefault();
