@@ -158,6 +158,32 @@ describe('disasm data-gathering', () => {
         assert.doesNotThrow(() => { new Function(m![1]); }, 'webview script has a syntax error');
     });
 
+    // Regression: a step keybinding that contains a scroll key (the user's is
+    // ⌥↓) reaches the webview DOM as well as VS Code's keybinding service.
+    // Chromium's default action for it is an animated page-scroll of the pane
+    // — no wheel events, no JS scroll APIs — which keepPcVisible then snaps
+    // back from: THAT was the stepping "jump". The script must suppress the
+    // default action for scroll keys (and must not register the handler as
+    // passive, which would make preventDefault a silent no-op).
+    describe('webview keyboard-scroll suppression (stepping jump)', () => {
+        const script = () => api.webviewHtml().match(/<script>([\s\S]*?)<\/script>/)![1];
+        it('preventDefaults the scroll keys', () => {
+            const s = script();
+            for (const key of ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End']) {
+                assert.ok(s.includes(`'${key}'`), `scroll key ${key} must be suppressed`);
+            }
+            assert.ok(/scrollKeys[\s\S]{0,200}preventDefault/.test(s),
+                'keydown handler must preventDefault scroll keys');
+        });
+        it('keydown handler is not passive (preventDefault must work)', () => {
+            const handlers = script().match(/addEventListener\('keydown'[\s\S]*?\}, \{[^}]*\}\)/g) ?? [];
+            assert.ok(handlers.length > 0, 'expected a keydown listener in the webview script');
+            for (const h of handlers) {
+                assert.ok(!/passive:\s*true/.test(h), 'keydown listener must not be passive');
+            }
+        });
+    });
+
     // Regression: focusing the ASM pane must enable instruction-level F10/F11.
     // That works by sending bs/setAsmFocus to the adapter — but only for
     // BugStalker-family sessions. RA's "Debug" codelens launches a `lldb`-typed

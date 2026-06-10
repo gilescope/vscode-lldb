@@ -479,10 +479,22 @@ function webviewHtml(): string {
       return sivnOrig.apply(this, a);
     };
   }
+  // THE stepping-jump fix. A step keybinding that contains a scroll key (the
+  // user's is ⌥↓) reaches the webview DOM as well as VS Code's keybinding
+  // service: VS Code performs the step AND Chromium performs its default
+  // action — an animated page-scroll of the pane (no wheel events, no JS
+  // scroll APIs, hence invisible to every wrap above). keepPcVisible then
+  // snaps back: page-down + snap-back = the jump. The pane has no keyboard
+  // UI, so suppress the default scroll action outright; VS Code still gets
+  // the keybinding (the webview host forwards a cloned event regardless).
+  const scrollKeys = ['ArrowDown', 'ArrowUp', 'PageDown', 'PageUp', 'Home', 'End', ' '];
   window.addEventListener('keydown', (e) => {
     diag('keydown key=' + e.key + ' code=' + e.code + ' target=<'
        + (e.target && (e.target.className || e.target.tagName) || '?') + '>');
-  }, { passive: true, capture: true });
+    const editable = e.target && (e.target.isContentEditable
+      || e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA');
+    if (!editable && scrollKeys.indexOf(e.key) >= 0) e.preventDefault();
+  }, { capture: true });
 
   let cursorLine = 0;
   let registers = {};   // live GPRs at the current stop ({ x0: "0x…", … })
