@@ -415,6 +415,33 @@ function webviewHtml(): string {
       diag('scrolled to y=' + Math.round(window.scrollY) + ' vh=' + window.innerHeight);
     });
   });
+  // Initiator attribution: the pane drifted ~450px before a step with no code
+  // path that could do it. Distinguish user wheel/trackpad (momentum fires
+  // wheel events) from programmatic scrolls (caught by wrapping the APIs).
+  let wheelCount = 0;
+  window.addEventListener('wheel', (e) => {
+    wheelCount++;
+    if (wheelCount === 1 || wheelCount % 20 === 0) {
+      diag('wheel #' + wheelCount + ' dy=' + Math.round(e.deltaY) + ' (user scroll input)');
+    }
+  }, { passive: true });
+  const sivOrig = Element.prototype.scrollIntoView;
+  Element.prototype.scrollIntoView = function (opts) {
+    const at = (new Error().stack || '').split('\\n')[2] || '?';
+    diag('scrollIntoView <' + (this.className || this.tagName) + '> '
+       + JSON.stringify(opts) + ' from ' + at.trim());
+    return sivOrig.call(this, opts);
+  };
+  const stoOrig = window.scrollTo.bind(window);
+  window.scrollTo = function (...a) {
+    diag('window.scrollTo(' + JSON.stringify(a) + ')');
+    return stoOrig(...a);
+  };
+  const sbyOrig = window.scrollBy.bind(window);
+  window.scrollBy = function (...a) {
+    diag('window.scrollBy(' + JSON.stringify(a) + ')');
+    return sbyOrig(...a);
+  };
 
   let cursorLine = 0;
   let registers = {};   // live GPRs at the current stop ({ x0: "0x…", … })
