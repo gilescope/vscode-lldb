@@ -46,6 +46,7 @@ import {
     configureEditContinueForRustAnalyzerTemp,
     prebuildEditContinueBinary,
 } from '../editContinue';
+import { createVariablesEnhancer } from './varEnhancer';
 
 async function resolveAbsoluteExe(bin: string): Promise<string | undefined> {
     if (path.isAbsolute(bin)) return bin;
@@ -140,7 +141,17 @@ export async function getBugStalkerAdapterExecutable(
             socket.destroy();
             return;
         }
-        child.stdout.pipe(socket);
+        // Variables-view §1: insert a DAP-aware transform on the
+        // adapter→client direction so we can decorate Variable and
+        // StackFrame entries with the storage / mutability / heap /
+        // byte-size / recursion glyphs the bugstalker side emits as
+        // custom fields. VS Code → adapter direction stays direct —
+        // we don't mutate any requests.
+        const enhancer = createVariablesEnhancer(output);
+        enhancer.on('error', err => {
+            output.appendLine(`[bs] var-enhancer error: ${err.message}`);
+        });
+        child.stdout.pipe(enhancer).pipe(socket);
         socket.pipe(child.stdin);
 
         const teardown = () => {
@@ -203,6 +214,20 @@ export class BugStalkerConfigProvider implements DebugConfigurationProvider {
             launchConfig.args = stringArgv(launchConfig.args);
         }
 
+        // Thread the `bugstalker.focusPanicCulprit` user/workspace setting
+        // through as the launch default, unless launch.json sets it
+        // explicitly (an explicit value always wins). The adapter itself
+        // defaults to `true` when the field is absent; this lets a user flip
+        // the default globally without editing every launch.json.
+        if (launchConfig.focusPanicCulprit === undefined) {
+            const v = workspace
+                .getConfiguration('bugstalker', folder?.uri)
+                .get<boolean>('focusPanicCulprit');
+            if (typeof v === 'boolean') {
+                launchConfig.focusPanicCulprit = v;
+            }
+        }
+
         // Cargo build integration. When `cargo` block is present:
         //
         //   1. run `cargo <args> --message-format=json`,
@@ -240,9 +265,26 @@ export class BugStalkerConfigProvider implements DebugConfigurationProvider {
                     );
                     return null;
                 }
-                const adapterEnv = workspace
-                    .getConfiguration('bugstalker', folder?.uri)
-                    .get<{ [k: string]: string }>('adapterEnv', {});
+                const cfg = workspace.getConfiguration('bugstalker', folder?.uri);
+                const adapterEnv = cfg.get<{ [k: string]: string }>('adapterEnv', {});
+
+                // Inject --release when buildMode is "release" and the user
+                // hasn't already specified a profile/mode flag.
+                const buildMode = cfg.get<string>('buildMode', 'release');
+                const cargoArgs: string[] = launchConfig.cargo.args ?? [];
+                const hasProfile = cargoArgs.some(
+                    a => a === '--release' || a.startsWith('--profile'),
+                );
+                if (buildMode === 'release' && !hasProfile) {
+                    const sep = cargoArgs.indexOf('--');
+                    cargoArgs.splice(sep >= 0 ? sep : cargoArgs.length, 0, '--release');
+                    launchConfig.cargo.args = cargoArgs;
+                    // Preserve full debug info in release builds so DWARF is intact.
+                    if (!adapterEnv['CARGO_PROFILE_RELEASE_DEBUG']) {
+                        adapterEnv['CARGO_PROFILE_RELEASE_DEBUG'] = '2';
+                    }
+                }
+
                 const cargo = new Cargo(cargoTomlFolder, adapterEnv);
                 const program = await cargo.getProgramFromCargoConfig(launchConfig.cargo);
                 const cargoDict = { program };

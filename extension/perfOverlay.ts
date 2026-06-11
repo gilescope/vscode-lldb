@@ -11,13 +11,16 @@
 // the DAP session at `src/dap/yadap/session/perf.rs`.
 
 import {
-    debug, window, Uri,
+    commands, debug, languages, window, Uri,
     DecorationOptions, DebugAdapterTracker, DebugAdapterTrackerFactory,
-    DebugSession, ExtensionContext,
-    OverviewRulerLane, Range, StatusBarAlignment, StatusBarItem,
+    DebugSession, Event, EventEmitter, ExtensionContext,
+    Hover, HoverProvider, MarkdownString, OverviewRulerLane, Position,
+    ProviderResult, Range, StatusBarAlignment, StatusBarItem, TextDocument,
     TextEditor, TextEditorDecorationType,
+    ThemeColor, ThemeIcon, TreeDataProvider, TreeItem, TreeItemCollapsibleState,
 } from 'vscode';
 import { output } from './main';
+import { ipcGauge } from './perfGauge';
 
 // Heat buckets keyed off the `heat` field returned by bs/perfOverlay,
 // which is samples-on-this-line / samples-on-hottest-line-in-this-source.
@@ -25,7 +28,7 @@ import { output } from './main';
 //   - cold, warm, hot, hottest
 // Colours are tuned to be visible on both dark and light themes.
 const HEAT_TIERS: ReadonlyArray<{ readonly max: number; readonly colour: string }> = [
-    { max: 0.25, colour: '#7aa2f7' }, // cold — blue
+    { max: 0.25, colour: '#9ece6a' }, // cheap — green (good)
     { max: 0.50, colour: '#e0af68' }, // warm — amber
     { max: 0.75, colour: '#ff9e64' }, // hot — orange
     { max: 1.01, colour: '#f7768e' }, // hottest — red-pink
@@ -95,6 +98,23 @@ interface PerfStoppedSummary {
         sampleShare: number;
     };
     unresolvedSamples: number;
+    // Memory-footprint change over the window, in bytes (signed). macOS
+    // only (rusage ri_phys_footprint delta); null on Linux. A cheap proxy
+    // for "did this step allocate" — footprint growth, not a malloc count.
+    physFootprintDelta?: number | null;
+}
+
+// Per-line step cost. `inst`/`hits` accumulate (the gutter column's heat
+// is relative accumulated instructions); the `last*` fields hold the most
+// recent step's metrics, which is what the pane reports ("since last step").
+interface StepCost {
+    inst: number;
+    hits: number;
+    lastInst: number;
+    lastCycles: number;
+    lastIpc: number | null;
+    lastDiagnosis: PerfDiagnosis | null;
+    lastMemDelta: number | null;
 }
 
 interface SessionState {
@@ -108,9 +128,41 @@ interface SessionState {
     // can detect they've been overtaken and bail out before painting.
     generation: number;
     enabled: boolean;
+    // --- per-step cost annotation (blame-style inline `after` text) ---
+    // The PC sampler can't profile a single step (microseconds → ~0
+    // samples), but the rusage/PMU counter gives exact instructions-
+    // retired per run window — and every step IS a run window. We pin
+    // that count to the line the step executed — rendered as a narrow
+    // fixed-width `before` column (GitLens file-blame style): per-line
+    // instruction count + heat-coloured left border, code shifted right.
+    stepColumn: TextEditorDecorationType;
+    // Location at the previous stop = the line the *next* step executes.
+    prevStop?: { fsPath: string; line: number };
+    // Undo stack: one entry per forward step, so a reverse step (stepBack)
+    // can subtract exactly what the matching forward step added rather than
+    // double-counting when you re-walk a line.
+    stepHistory: Array<{ fsPath: string; line: number; inst: number }>;
+    // Last debug *navigation* command seen (next/stepIn/stepOut/stepBack/…),
+    // captured from onWillReceiveMessage — the stopped event alone can't tell
+    // a forward step from a reverse one.
+    lastCommand?: string;
+    // Toggled by bugstalker.togglePerfStepCosts. When false we stop
+    // recording and clear the inline annotations.
+    stepCostsEnabled: boolean;
 }
 
 let active: SessionState | undefined;
+
+// Per-line step costs — fsPath → (1-based line → accumulated cost). Lives
+// at module scope (not on `active`) so the HoverProvider and the test hook
+// can read/write it without a live debug session. Cleared on each bind.
+const stepCosts = new Map<string, Map<number, StepCost>>();
+
+// The line the Step Costs pane reports on: the line a forward step just
+// executed (so you see what that step cost), or the line you're stopped at
+// otherwise. The pane is our stand-in for the per-line hover, which VS Code
+// reserves for the debugger's value evaluation during a session.
+let focusLine: { fsPath: string; line: number } | undefined;
 
 export function registerPerfOverlay(ctx: ExtensionContext): void {
     const factory: DebugAdapterTrackerFactory = {
@@ -122,8 +174,34 @@ export function registerPerfOverlay(ctx: ExtensionContext): void {
         ctx.subscriptions.push(debug.registerDebugAdapterTrackerFactory(type, factory));
     }
 
+    ctx.subscriptions.push(commands.registerCommand('bugstalker.togglePerfStepCosts', togglePerfStepCosts));
+
+    stepCostsProvider = new StepCostsProvider();
+    ctx.subscriptions.push(window.registerTreeDataProvider('bugstalker.stepCosts', stepCostsProvider));
+    ctx.subscriptions.push(commands.registerCommand('bugstalker.clearStepCosts', clearStepCosts));
+
+    // Hover with the exact per-line count. A HoverProvider (vs a decoration
+    // hoverMessage) is what VS Code *merges* with the debug value hover and
+    // what `vscode.executeHoverProvider` can read back for tests.
+    ctx.subscriptions.push(
+        languages.registerHoverProvider({ scheme: 'file', language: 'rust' }, new StepCostHoverProvider()),
+    );
+
     ctx.subscriptions.push(debug.onDidStartDebugSession(onSessionStart));
     ctx.subscriptions.push(debug.onDidTerminateDebugSession(onSessionEnd));
+    // The Step Costs pane reports on the line under the cursor. Following
+    // the cursor (rather than the debugger stop) lets you inspect *any*
+    // line's cost by clicking it, and sidesteps the step-attribution timing
+    // (cost lands on the line you left, not the one you land on). A debug
+    // stop moves the cursor too, so the pane still tracks stepping for free.
+    ctx.subscriptions.push(window.onDidChangeTextEditorSelection((e) => {
+        if (!active || !rustEditor(e.textEditor)) return;
+        const line = e.selections[0]?.active.line;
+        if (line == null) return;
+        focusLine = { fsPath: e.textEditor.document.uri.fsPath, line: line + 1 };
+        stepCostsProvider?.refresh();
+    }));
+
     ctx.subscriptions.push(window.onDidChangeActiveTextEditor(() => {
         // When the user opens a previously-unrequested file, fetch its
         // overlay; otherwise repaint from cache.
@@ -144,33 +222,70 @@ function shouldEnable(cfg: { perfOverlay?: boolean }): boolean {
     return cfg.perfOverlay !== false;
 }
 
-async function onSessionStart(session: DebugSession): Promise<void> {
+function onSessionStart(session: DebugSession): void {
     if (!isBugStalkerSession(session)) return;
     if (!shouldEnable(session.configuration as { perfOverlay?: boolean })) return;
-    if (active) teardown(); // one overlay at a time
+    // Bind only if nothing is active yet. If another session already owns
+    // the overlay we leave it — the overlay then *follows* whichever
+    // session actually emits a stopped event (see makeTracker). This is
+    // what keeps the EnC prebuild-fallback double-launch from parking the
+    // overlay on an idle session while the user steps the other one.
+    if (!active) bindTo(session);
+}
 
+// Synchronously create overlay UI state for `session` and kick off the
+// (async) enable. State must exist immediately so a stopped event that
+// triggered a rebind can paint without awaiting.
+function bindTo(session: DebugSession): void {
+    if (active) teardown();
     const statusItem = window.createStatusBarItem(StatusBarAlignment.Right, 90);
     statusItem.text = 'perf: -';
     statusItem.tooltip = 'BugStalker performance overlay';
     statusItem.show();
-
     active = {
         session,
         statusItem,
-        decorations: HEAT_TIERS.map((tier) => buildDecorationType(tier.colour)),
+        decorations: [], // gutter heat bars retired — the column is the surface now
         fileCache: new Map(),
         generation: 0,
         enabled: false,
+        // Narrow `before`-column for per-step cost (file-blame style).
+        // Empty handle — all styling is set per-line in renderOptions.before.
+        stepColumn: window.createTextEditorDecorationType({}),
+        stepHistory: [],
+        stepCostsEnabled: true,
     };
+    stepCosts.clear(); // fresh costs for the new session
+    focusLine = undefined;
+    const name = (session.configuration as { name?: string })?.name ?? session.id;
+    output.appendLine(`[perf] overlay → session "${name}" (${session.type})`);
+    stepCostsProvider?.refresh(); // fresh (empty) costs for the new session
+    void enableOverlay(session);
+}
 
+async function enableOverlay(session: DebugSession): Promise<void> {
     try {
-        await session.customRequest('bs/perfOverlayEnable', {});
-        active.enabled = true;
-        output.appendLine('[perf] overlay enabled');
+        // bs answers with { enabled, unavailable?, intelPt?, kperf? }. A
+        // successful *request* doesn't mean collection is live: a bs built
+        // without `--features perf` (or a platform/permission shortfall)
+        // replies enabled:false with a reason in `unavailable`. Surface that
+        // — otherwise the status bar sits at the initial 'perf: -' with no clue.
+        const resp = (await session.customRequest('bs/perfOverlayEnable', {})) as
+            | { enabled?: boolean; unavailable?: string | null }
+            | undefined;
+        if (active?.session.id !== session.id) return; // rebound away mid-flight
+        if (resp?.enabled) {
+            active.enabled = true;
+            output.appendLine('[perf] overlay enabled');
+        } else {
+            const why = resp?.unavailable ?? 'adapter reported perf overlay unavailable (no reason given)';
+            output.appendLine(`[perf] overlay unavailable — ${why}`);
+            active.statusItem.tooltip = `BugStalker performance overlay unavailable — ${why}`;
+        }
     } catch (err) {
         output.appendLine(`[perf] enable failed: ${formatErr(err)}`);
-        // Keep the state object around — without enable we still pick
-        // up StoppedEvent.body.bs_perf for the status bar.
+        // Without enable we still pick up StoppedEvent.body.bs_perf and
+        // per-step costs; only the sampler gutter fetch needs `enabled`.
     }
 }
 
@@ -187,21 +302,47 @@ function teardown(): void {
         }
         dt.dispose();
     }
+    for (const editor of window.visibleTextEditors) {
+        editor.setDecorations(active.stepColumn, []);
+    }
+    active.stepColumn.dispose();
     active.statusItem.dispose();
     active = undefined;
+    stepCostsProvider?.refresh(); // empties the sidebar
 }
+
+// Debug navigation requests we care about — used to tell a forward step
+// from a reverse step (stepBack), which the stopped event can't.
+const NAV_COMMANDS = new Set(['next', 'stepIn', 'stepOut', 'stepBack', 'continue', 'reverseContinue', 'bs/stepIn']);
+const FORWARD_STEPS = new Set(['next', 'stepIn', 'stepOut', 'bs/stepIn']);
 
 function makeTracker(session: DebugSession): DebugAdapterTracker {
     return {
-        onDidSendMessage: (m: { type?: string; event?: string; body?: { reason?: string; bs_perf?: PerfStoppedSummary } }) => {
-            if (m.type !== 'event' || m.event !== 'stopped') return;
+        // Requests heading TO the adapter — remember the last navigation
+        // command so attribution knows the direction of travel.
+        onWillReceiveMessage: (m: { type?: string; command?: string }) => {
             if (active?.session.id !== session.id) return;
+            if (m.type === 'request' && m.command && NAV_COMMANDS.has(m.command)) {
+                active.lastCommand = m.command;
+            }
+        },
+        onDidSendMessage: (m: { type?: string; event?: string; body?: { reason?: string; threadId?: number; bs_perf?: PerfStoppedSummary } }) => {
+            if (m.type !== 'event' || m.event !== 'stopped') return;
+            // Follow the session the user is actually stepping: if a stop
+            // arrives for a session that isn't the bound one, rebind to it.
+            // (EnC fallback can launch a second, idle session that would
+            // otherwise hold the overlay.)
+            if (active?.session.id !== session.id) {
+                if (!isBugStalkerSession(session)) return;
+                if (!shouldEnable(session.configuration as { perfOverlay?: boolean })) return;
+                output.appendLine(`[perf] stop from unbound session — rebinding`);
+                bindTo(session);
+            }
             const summary = m.body?.bs_perf;
             if (summary) updateStatus(summary);
-            // Fetch fresh per-file overlays for every visible Rust file.
-            active.generation += 1;
-            const gen = active.generation;
-            void refreshVisible(gen);
+            // Attribute this run window's instruction cost to the line the
+            // step executed (best-effort; needs an async stackTrace).
+            void attributeStep(m.body?.threadId, summary);
         },
     };
 }
@@ -215,11 +356,22 @@ function updateStatus(summary: PerfStoppedSummary): void {
         // tooltip.
         parts.push(summary.diagnosis.emoji);
     }
-    parts.push(`perf ${formatCost(summary)}`);
-    if (summary.runInstructions && summary.runInstructions > 0) {
-        parts.push(`${formatScaled(summary.runInstructions, 'inst')}`);
+    // Cost cell prefers cycles (Linux PMU); on macOS there are no
+    // cycles, so lead with instructions retired (exact, meaningful even
+    // for one step) rather than a near-zero CPU-time that rounds to '-'.
+    const cost = formatCost(summary);
+    parts.push(`perf ${cost}`);
+    const haveInst = !!(summary.runInstructions && summary.runInstructions > 0);
+    // Don't repeat instructions when formatCost already used them.
+    if (haveInst && summary.runCycles > 0) {
+        parts.push(`${formatScaled(summary.runInstructions!, 'inst')}`);
     }
-    if (summary.ipc && summary.ipc > 0) {
+    const gauge = ipcGauge(summary);
+    if (gauge) {
+        parts.push(gauge.short);
+    } else if (summary.ipc && summary.ipc > 0) {
+        // Sub-threshold: show the raw number but no /6.0 gauge — cycles aren't
+        // trustworthy enough at this window size to compare against peak.
         parts.push(`IPC ${summary.ipc.toFixed(2)}`);
     }
     parts.push(formatDurationNs(summary.runWallNs));
@@ -239,9 +391,11 @@ function updateStatus(summary: PerfStoppedSummary): void {
         (summary.runInstructions && summary.runInstructions > 0
             ? `  inst:    ${summary.runInstructions.toLocaleString()} retired\n`
             : '') +
-        (summary.ipc && summary.ipc > 0
-            ? `  IPC:     ${summary.ipc.toFixed(3)} (instructions / cycles)\n`
-            : '') +
+        (gauge
+            ? gauge.detail
+            : summary.ipc && summary.ipc > 0
+                ? `  IPC:     ${summary.ipc.toFixed(3)} (instructions / cycles; window too small to gauge vs peak)\n`
+                : '') +
         `  wall:    ${formatDurationNs(summary.runWallNs)}\n` +
         (summary.hot
             ? `  hot:     ${summary.hot.source}:${summary.hot.line} (${summary.hot.sampleCount} samples)\n`
@@ -280,6 +434,12 @@ function describeMode(mode: PerfMode | undefined): string {
 /// the column is never blank.
 function formatCost(summary: PerfStoppedSummary): string {
     if (summary.runCycles > 0) return formatCycles(summary.runCycles);
+    // macOS: no cycle counter. Instructions retired is the exact,
+    // step-meaningful number; CPU-time on a single line is ~microseconds
+    // and far less informative, so prefer instructions over it.
+    if (summary.runInstructions && summary.runInstructions > 0) {
+        return formatScaled(summary.runInstructions, 'inst');
+    }
     if (summary.runCpuTimeNs && summary.runCpuTimeNs > 0) {
         return `${formatDurationNs(summary.runCpuTimeNs)} cpu`;
     }
@@ -314,7 +474,10 @@ async function refreshEditor(editor: TextEditor, gen: number): Promise<void> {
     try {
         response = await active.session.customRequest('bs/perfOverlay', {
             source: fsPath,
-            window: 'LastRun',
+            // Adapter expects camelCase 'lastRun' | 'cumulative'
+            // (perf.rs parse_perf_overlay_window). PascalCase here was
+            // rejected on every stop, leaving the gutter permanently empty.
+            window: 'lastRun',
         }) as PerfOverlayResponse;
     } catch (err) {
         // perfOverlay is a best-effort surface. If the adapter doesn't
@@ -331,14 +494,289 @@ async function refreshEditor(editor: TextEditor, gen: number): Promise<void> {
 function repaintAllVisible(): void {
     if (!active) return;
     for (const editor of window.visibleTextEditors) {
-        if (!rustEditor(editor)) continue;
-        const cached = active.fileCache.get(editor.document.uri.fsPath);
-        if (cached) {
-            paint(editor, cached);
-        } else if (active.enabled) {
-            // Newly-visible editor — fetch its overlay.
-            void refreshEditor(editor, active.generation);
+        repaintStepCosts(editor.document.uri.fsPath);
+    }
+}
+
+// Top frame of the stopped thread = the source location now. Best-effort:
+// a failed/again-stale stackTrace just skips this step's attribution.
+async function topFrame(threadId: number): Promise<{ fsPath: string; line: number } | undefined> {
+    if (!active) return undefined;
+    try {
+        const resp = (await active.session.customRequest('stackTrace', {
+            threadId, startFrame: 0, levels: 1,
+        })) as { stackFrames?: Array<{ line?: number; source?: { path?: string } }> };
+        const f = resp.stackFrames?.[0];
+        if (f?.source?.path && typeof f.line === 'number') {
+            return { fsPath: f.source.path, line: f.line };
         }
+    } catch { /* best-effort */ }
+    return undefined;
+}
+
+async function attributeStep(
+    threadId: number | undefined,
+    summary: PerfStoppedSummary | undefined,
+): Promise<void> {
+    if (!active || !active.stepCostsEnabled) return;
+    const cmd = active.lastCommand;
+    active.lastCommand = undefined; // consume — one attribution per stop
+    const here = threadId != null ? await topFrame(threadId) : undefined;
+    if (!active) return; // overtaken / torn down during the await
+
+    if (cmd === 'stepBack') {
+        // Reverse step: undo the matching forward step's cost instead of
+        // adding, so re-walking a line doesn't double-count.
+        const last = active.stepHistory.pop();
+        if (last) {
+            unrecordStepCost(last.fsPath, last.line, last.inst);
+            repaintStepCosts(last.fsPath);
+        }
+    } else if (cmd && FORWARD_STEPS.has(cmd) && active.prevStop && (summary?.runInstructions ?? 0) > 0) {
+        // Forward step: the run window's instructions executed the line we
+        // were parked on (prevStop). A continue/breakpoint isn't a step, so
+        // its (arbitrary) cost is never smeared onto one line.
+        const prev = active.prevStop;
+        const inst = summary!.runInstructions!;
+        recordStepCost(prev.fsPath, prev.line, summary!);
+        active.stepHistory.push({ fsPath: prev.fsPath, line: prev.line, inst });
+        repaintStepCosts(prev.fsPath);
+    }
+    active.prevStop = here;
+    // `focusLine` is cursor-driven (see onDidChangeTextEditorSelection), not
+    // set here — but refresh so the pane reflects a cost that just changed on
+    // the line the cursor already sits on.
+    stepCostsProvider?.refresh();
+}
+
+function recordStepCost(fsPath: string, line: number, summary: PerfStoppedSummary): void {
+    const inst = summary.runInstructions ?? 0;
+    const last = {
+        lastInst: inst,
+        lastCycles: summary.runCycles ?? 0,
+        lastIpc: summary.ipc ?? null,
+        lastDiagnosis: summary.diagnosis ?? null,
+        lastMemDelta: summary.physFootprintDelta ?? null,
+    };
+    let byLine = stepCosts.get(fsPath);
+    if (!byLine) {
+        byLine = new Map();
+        stepCosts.set(fsPath, byLine);
+    }
+    const cur = byLine.get(line);
+    if (cur) {
+        cur.inst += inst;
+        cur.hits += 1;
+        Object.assign(cur, last); // overwrite last-step metrics
+    } else {
+        byLine.set(line, { inst, hits: 1, ...last });
+    }
+}
+
+// Inverse of recordStepCost — used when a reverse step undoes a forward one.
+function unrecordStepCost(fsPath: string, line: number, inst: number): void {
+    const byLine = stepCosts.get(fsPath);
+    const cur = byLine?.get(line);
+    if (!cur) return;
+    cur.inst -= inst;
+    cur.hits -= 1;
+    if (cur.hits <= 0 || cur.inst <= 0) byLine!.delete(line);
+}
+
+// Compact magnitude, fixed-ish width for column alignment: 92, 18k, 3.8M, 1.2G.
+function formatCompact(v: number): string {
+    if (v >= 1_000_000_000) return `${(v / 1_000_000_000).toFixed(1)}G`;
+    if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+    if (v >= 1_000) return `${Math.round(v / 1_000)}k`;
+    return `${v}`;
+}
+
+// Per-tier emoji shown in the margin cell, index-aligned with HEAT_TIERS.
+// Easy to swap for any scheme (🔥, thermometer, etc.).
+const TIER_EMOJI: readonly string[] = ['🟢', '🟡', '🟠', '🔴'];
+
+// #rrggbb → rgba(...) so the margin background can be a faint tint of the
+// line's heat colour (the attachment backgroundColor wants a CSS string).
+function tint(hex: string, alpha: number): string {
+    const h = hex.replace('#', '');
+    const r = parseInt(h.slice(0, 2), 16);
+    const g = parseInt(h.slice(2, 4), 16);
+    const b = parseInt(h.slice(4, 6), 16);
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+}
+
+// Render per-step cost as a narrow fixed-width `before` column, à la
+// GitLens "toggle file blame": every line gets a same-width cell so the
+// code shifts right as one block (blank cells where no cost), and the
+// instruction count + heat-coloured left border land on stepped lines.
+// border/padding/background aren't on the attachment API, so they ride
+// in on the `textDecoration` CSS-injection trick GitLens uses.
+function repaintStepCosts(fsPath: string): void {
+    if (!active) return;
+    const editor = window.visibleTextEditors.find((e) => e.document.uri.fsPath === fsPath);
+    if (!editor) return;
+    const byLine = active.stepCostsEnabled ? stepCosts.get(fsPath) : undefined;
+    if (!byLine || byLine.size === 0) {
+        editor.setDecorations(active.stepColumn, []);
+        return;
+    }
+    let max = 0;
+    for (const cost of byLine.values()) max = Math.max(max, cost.inst);
+
+    const dim = new ThemeColor('editorCodeLens.foreground');
+    const opts: DecorationOptions[] = [];
+    for (let ln = 0; ln < editor.document.lineCount; ln += 1) {
+        const cost = byLine.get(ln + 1);
+        const tier = cost ? pickTier(cost.inst / max) : -1;
+        const tierHex = cost ? HEAT_TIERS[tier].colour : 'transparent';
+        const cell: DecorationOptions = {
+            // Cost cells span the first character so the hover has a target
+            // (a zero-width range / gutter has none); blank cells stay
+            // zero-width to avoid stealing hovers on un-stepped lines.
+            // Zero-width point at col 0: the column is purely visual. NO
+            // hoverMessage — a decoration hover here competes in the same
+            // widget as the debug value hover and, after a few hovers, was
+            // leaving the variable hover empty. Exact counts live in the
+            // Step Costs sidebar instead.
+            range: new Range(ln, 0, ln, 0),
+            renderOptions: {
+                before: {
+                    // emoji + magnitude, e.g. "🔴 3.8M". The count is
+                    // right-aligned via CSS (`text-align: right` below) so the
+                    // digits flush to the column's right edge, against the code —
+                    // space-padding doesn't work here, the gutter font is
+                    // proportional.
+                    contentText: cost ? `${TIER_EMOJI[tier]} ${formatCompact(cost.inst)}` : '',
+                    color: dim,
+                    width: '10ch',
+                    margin: '0 1ch 0 0',
+                    // Background is a faint tint of the line's heat colour;
+                    // empty cells keep a neutral band.
+                    backgroundColor: cost ? tint(tierHex, 0.18) : 'rgba(127,127,127,0.05)',
+                    textDecoration:
+                        `none; border-left: 3px solid ${tierHex}; padding-left: 5px; box-sizing: border-box; display: inline-block; text-align: right;`,
+                },
+            },
+        };
+        opts.push(cell);
+    }
+    editor.setDecorations(active.stepColumn, opts);
+}
+
+function togglePerfStepCosts(): void {
+    if (!active) {
+        void window.showInformationMessage('BugStalker: no active debug session for per-step costs.');
+        return;
+    }
+    active.stepCostsEnabled = !active.stepCostsEnabled;
+    for (const editor of window.visibleTextEditors) {
+        repaintStepCosts(editor.document.uri.fsPath);
+    }
+    stepCostsProvider?.refresh();
+    output.appendLine(`[perf] per-step cost annotations ${active.stepCostsEnabled ? 'on' : 'off'}`);
+}
+
+function clearStepCosts(): void {
+    if (!active) return;
+    stepCosts.clear();
+    focusLine = undefined;
+    for (const editor of window.visibleTextEditors) {
+        repaintStepCosts(editor.document.uri.fsPath);
+    }
+    stepCostsProvider?.refresh();
+    output.appendLine('[perf] step costs cleared');
+}
+
+// --- Step Costs sidebar (TreeView) -----------------------------------
+// Per-line readout for the line currently in focus (the line a step just
+// executed, or the line you're stopped at). This is the stand-in for the
+// per-line hover, which VS Code reserves for the debugger during a session.
+// Rendered as a small key/value list: a header (file:line, click to jump)
+// followed by instructions / steps / avg rows.
+type PaneNode =
+    | { kind: 'header'; fsPath: string; line: number; cost?: StepCost; tier: number }
+    | { kind: 'metric'; label: string; value: string }
+    | { kind: 'diag'; emoji: string; label: string; summary: string; hint: string }
+    | { kind: 'info'; text: string };
+
+// Index-aligned with HEAT_TIERS — built-in chart ThemeColors so the dot
+// matches the gutter green→red without shipping custom colours.
+const TIER_CHART_COLORS: readonly string[] = ['charts.green', 'charts.yellow', 'charts.orange', 'charts.red'];
+
+let stepCostsProvider: StepCostsProvider | undefined;
+
+class StepCostsProvider implements TreeDataProvider<PaneNode> {
+    private readonly emitter = new EventEmitter<void>();
+    readonly onDidChangeTreeData: Event<void> = this.emitter.event;
+
+    refresh(): void {
+        this.emitter.fire();
+    }
+
+    // Flat list: header + metric rows for the focus line. (No `element`
+    // arg used — the list is one level deep.)
+    getChildren(): PaneNode[] {
+        if (active && !active.stepCostsEnabled) return [];
+        if (!focusLine) return [{ kind: 'info', text: 'Step to record per-line cost' }];
+
+        const byLine = stepCosts.get(focusLine.fsPath);
+        const cost = byLine?.get(focusLine.line);
+        // Tier relative to this file's hottest stepped line.
+        let max = 0;
+        if (byLine) for (const c of byLine.values()) max = Math.max(max, c.inst);
+        const tier = cost && max > 0 ? pickTier(cost.inst / max) : 0;
+
+        const header: PaneNode = { kind: 'header', fsPath: focusLine.fsPath, line: focusLine.line, cost, tier };
+        if (!cost) {
+            return [header, { kind: 'info', text: 'no recorded cost for this line yet' }];
+        }
+        // Last step's metrics ("since last step"). cycles/IPC are PMU-only,
+        // so '—' on macOS (no kperf entitlement); instructions + memory Δ
+        // come from the rusage path and are real there.
+        const rows: PaneNode[] = [
+            header,
+            { kind: 'metric', label: 'instructions', value: cost.lastInst.toLocaleString() },
+            { kind: 'metric', label: 'cycles', value: cost.lastCycles > 0 ? cost.lastCycles.toLocaleString() : '—' },
+            { kind: 'metric', label: 'IPC', value: cost.lastIpc != null && cost.lastIpc > 0 ? cost.lastIpc.toFixed(2) : '—' },
+            { kind: 'metric', label: 'memory Δ', value: cost.lastMemDelta != null ? formatBytesSigned(cost.lastMemDelta) : '—' },
+        ];
+        // Categorisation last, with the full "how to improve" detail.
+        const d = cost.lastDiagnosis;
+        if (d) {
+            rows.push({ kind: 'diag', emoji: d.emoji, label: d.label, summary: d.summary, hint: d.hint });
+            if (d.summary) rows.push({ kind: 'info', text: d.summary });
+            if (d.hint) rows.push({ kind: 'info', text: `↳ ${d.hint}` });
+        }
+        return rows;
+    }
+
+    getTreeItem(node: PaneNode): TreeItem {
+        if (node.kind === 'info') {
+            const item = new TreeItem(node.text, TreeItemCollapsibleState.None);
+            item.iconPath = new ThemeIcon('info');
+            return item;
+        }
+        if (node.kind === 'metric') {
+            const item = new TreeItem(node.label, TreeItemCollapsibleState.None);
+            item.description = node.value;
+            return item;
+        }
+        if (node.kind === 'diag') {
+            // Categorisation header row: emoji + label, full detail on hover.
+            const item = new TreeItem(`${node.emoji} ${node.label}`, TreeItemCollapsibleState.None);
+            item.tooltip = `${node.summary}\n\n${node.hint}`;
+            return item;
+        }
+        // header — line + heat dot. Categorisation now lives at the bottom.
+        const item = new TreeItem(`${shortPath(node.fsPath)}:${node.line}`, TreeItemCollapsibleState.None);
+        item.description = node.cost ? '' : '—';
+        item.iconPath = new ThemeIcon('circle-filled', new ThemeColor(TIER_CHART_COLORS[node.tier]));
+        item.command = {
+            command: 'vscode.open',
+            title: 'Open',
+            arguments: [Uri.file(node.fsPath), { selection: new Range(node.line - 1, 0, node.line - 1, 0) }],
+        };
+        return item;
     }
 }
 
@@ -347,7 +785,9 @@ function paint(editor: TextEditor, lines: PerfOverlayLine[]): void {
     const buckets: DecorationOptions[][] = HEAT_TIERS.map((): DecorationOptions[] => []);
     for (const line of lines) {
         const tier = pickTier(line.heat);
-        const zeroBased = Math.max(0, line.line - 1);
+        const zeroBased = Math.min(Math.max(0, line.line - 1), editor.document.lineCount - 1);
+        // Zero-width point at col 0 — gutter icon only, no overlap with
+        // code text (see repaintStepCosts), so debug/RA hovers are untouched.
         const range = new Range(zeroBased, 0, zeroBased, 0);
         const sharePct = (line.sampleShare * 100).toFixed(1);
         const hot = line.hottest ? ' [hottest]' : '';
@@ -386,7 +826,9 @@ function buildDecorationType(colour: string): TextEditorDecorationType {
 // glance. Bundled as a data URI so the extension ships no image files.
 function heatSvgUri(colour: string): Uri {
     const svg =
-        `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'>` +
+        // width/height (not just viewBox) — some VS Code versions won't
+        // size a gutter data: URI without explicit pixel dimensions.
+        `<svg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16'>` +
         `<rect x='6' y='2' width='4' height='12' rx='1' ry='1' fill='${colour}'/>` +
         `</svg>`;
     const encoded = Buffer.from(svg, 'utf8').toString('base64');
@@ -423,6 +865,84 @@ function formatDurationNs(ns: number): string {
 function formatErr(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
 }
+
+// Signed byte delta: "+1.2 MB", "-4.0 KB", "0 B".
+function formatBytesSigned(bytes: number): string {
+    if (bytes === 0) return '0 B';
+    const sign = bytes < 0 ? '-' : '+';
+    const a = Math.abs(bytes);
+    if (a >= 1024 * 1024 * 1024) return `${sign}${(a / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+    if (a >= 1024 * 1024) return `${sign}${(a / (1024 * 1024)).toFixed(1)} MB`;
+    if (a >= 1024) return `${sign}${(a / 1024).toFixed(1)} KB`;
+    return `${sign}${a} B`;
+}
+
+// Exact per-line count on hover. Unlike a decoration hoverMessage (which
+// competed with the debug value hover and left it empty), a HoverProvider
+// returns a scoped result VS Code merges — and `executeHoverProvider` can
+// read it back, so it's mechanically testable.
+class StepCostHoverProvider implements HoverProvider {
+    provideHover(document: TextDocument, position: Position): ProviderResult<Hover> {
+        if (active && !active.stepCostsEnabled) return undefined; // respect the toggle in-session
+        const cost = stepCosts.get(document.uri.fsPath)?.get(position.line + 1);
+        if (!cost) return undefined;
+        const md = new MarkdownString();
+        md.appendMarkdown(`**BugStalker step cost**\n\n`);
+        md.appendMarkdown(`- instructions: ${cost.inst.toLocaleString()}\n`);
+        md.appendMarkdown(`- steps over line: ${cost.hits}`);
+        if (cost.hits > 1) {
+            md.appendMarkdown(`\n- avg/step: ${Math.round(cost.inst / cost.hits).toLocaleString()}`);
+        }
+        return new Hover(md);
+    }
+}
+
+// Test hook returned from activate() — lets the @vscode/test-electron suite
+// inject step costs and query the HoverProvider without a live debug session.
+export const _perfTest = {
+    setStepCost(
+        fsPath: string,
+        line: number,
+        inst: number,
+        hits = 1,
+        extra?: { cycles?: number; ipc?: number | null; diagnosis?: PerfDiagnosis | null; memDelta?: number | null },
+    ): void {
+        let byLine = stepCosts.get(fsPath);
+        if (!byLine) {
+            byLine = new Map();
+            stepCosts.set(fsPath, byLine);
+        }
+        byLine.set(line, {
+            inst,
+            hits,
+            lastInst: inst,
+            lastCycles: extra?.cycles ?? 0,
+            lastIpc: extra?.ipc ?? null,
+            lastDiagnosis: extra?.diagnosis ?? null,
+            lastMemDelta: extra?.memDelta ?? null,
+        });
+        stepCostsProvider?.refresh();
+    },
+    // Point the Step Costs pane at a line (what a stop would do).
+    setFocus(fsPath: string, line: number): void {
+        focusLine = { fsPath, line };
+        stepCostsProvider?.refresh();
+    },
+    // Rendered pane rows as "label | description" strings, for assertions.
+    paneRows(): string[] {
+        if (!stepCostsProvider) return [];
+        return stepCostsProvider.getChildren().map((n) => {
+            const item = stepCostsProvider!.getTreeItem(n);
+            const label = typeof item.label === 'string' ? item.label : String(item.label?.label ?? '');
+            return item.description ? `${label} | ${item.description}` : label;
+        });
+    },
+    clear(): void {
+        stepCosts.clear();
+        focusLine = undefined;
+        stepCostsProvider?.refresh();
+    },
+};
 
 export const __test = {
     pickTier,

@@ -18,20 +18,25 @@ import {
     getBugStalkerAdapterExecutable,
 } from './novsc/bugstalker';
 import { BugStalkerTrackerFactory } from './novsc/tracker';
+import { glyphLegendLines } from './novsc/varEnhancer';
 import { registerEditContinue } from './editContinue';
-import { registerPerfOverlay } from './perfOverlay';
+import { registerPerfOverlay, _perfTest } from './perfOverlay';
+import { registerStepInto } from './stepInto';
+import { registerDisasmView, _disasmTest } from './disasmView';
 
 const execFileAsync = promisify(execFile);
 
 export const output = window.createOutputChannel('BugStalker');
 
-export function activate(context: ExtensionContext): void {
+export function activate(context: ExtensionContext): { _perfTest: typeof _perfTest; _disasmTest: typeof _disasmTest } {
     const subscriptions = context.subscriptions;
 
     void logVersionBanner(context);
 
     registerEditContinue(context);
     registerPerfOverlay(context);
+    registerStepInto(context);
+    registerDisasmView(context);
 
     const adapterFactory: DebugAdapterDescriptorFactory = {
         createDebugAdapterDescriptor: (_session, _executable) => {
@@ -61,6 +66,9 @@ export function activate(context: ExtensionContext): void {
             debug.registerDebugAdapterTrackerFactory(type, trackerFactory),
         );
     }
+
+    // Exposed for the @vscode/test-electron suite (see extension/test/).
+    return { _perfTest, _disasmTest };
 }
 
 export function deactivate(): void {
@@ -95,6 +103,12 @@ async function logVersionBanner(context: ExtensionContext): Promise<void> {
     } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         output.appendLine(`bs --version: failed — ${msg}`);
+    }
+
+    // The stock variables pane has no per-row tooltip, so print the
+    // decoration-glyph legend here once per session.
+    for (const line of glyphLegendLines()) {
+        output.appendLine(line);
     }
 }
 

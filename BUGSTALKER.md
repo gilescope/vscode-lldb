@@ -98,9 +98,9 @@ Attaching to a running process:
 
 | Setting | Default | Purpose |
 | ------- | ------- | ------- |
-| `bugstalker.executable` | `bs`    | Path / name of the BugStalker binary used as the DAP adapter. The default matches `cargo install bugstalker` (package is `bugstalker`, bin is `bs`). |
-| `bugstalker.logFile`    | unset   | When set, BugStalker writes adapter diagnostics to this file (`--dap-log-file`). Useful when filing issues. |
-| `bugstalker.adapterEnv` | `{}`    | Extra env vars for the spawned BugStalker process and for `cargo` invocations driven by the `cargo` block. |
+| `bugstalker.executable` | `bs` | Path / name of the BugStalker binary used as the DAP adapter. The default matches `cargo install bugstalker` (package is `bugstalker`, bin is `bs`). |
+| `bugstalker.logFile` | unset | When set, BugStalker writes adapter diagnostics to this file (`--dap-log-file`). Useful when filing issues. |
+| `bugstalker.adapterEnv` | `{}` | Extra env vars for the spawned BugStalker process and for `cargo` invocations driven by the `cargo` block. |
 
 ## What's wired up
 
@@ -110,6 +110,22 @@ Attaching to a running process:
   a debug-console snippet or extension to render the current task's
   awaitee chain (Phase 3 D3a). Schema documented at
   `doc/plans/phase-3-dyn-trait-and-async.md` in the BugStalker repo.
+
+## Variable glyphs
+
+Each variable's **name** carries a leading glyph for its storage class,
+coloured by how fast that data is to read — green = fastest, red =
+slowest. The glyphs are folded into the name — never the value — so
+"Copy Value" stays clean. Hover a row to see the meaning (it's appended
+to the variable's **type** tooltip); the full legend is also printed to
+the **BugStalker output channel** on session start:
+
+- 🟩 register — fastest (in a CPU register)
+- 🟢 stack — also fast (cache-hot stack slot)
+- 🟧 static — medium (fixed-address load; 🔒︎ marks read-only)
+- 🟥 thread-local — slowest class (thread-pointer resolution + load)
+- ↗ points into the heap — slowest to reach
+- 👻 optimized away — no value to read
 
 ## Cargo build integration
 
